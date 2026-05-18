@@ -27,5 +27,8 @@ public final class ProjectPaths {
     public static Path defaultDpoPath() {
         return repoRoot().resolve("datasets/DPO/dpo.jsonl");
     }
-}
 
+    public static Path defaultReportDir() {
+        return repoRoot().resolve("report");
+    }
+}

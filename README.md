@@ -12,7 +12,7 @@ CR-Agent 是一个 Java 实现的 agentic code review 系统。它可以通过�
 - PR review：读取 GitHub PR 元信息、diff、changed files、review comments、CI checks 和仓库上下文。
 - Commit range review：支持 `base...head`，也支持只给仓库时默认审查默认分支最新提交区间。
 - 本机 Git 优先：优先使用本机 clone、SSH/HTTPS Git 环境生成 diff；`GITHUB_TOKEN` 作为 GitHub API fallback。
-- 四阶段主流程：`Triage -> Analyze -> Review -> Act`。
+- 五阶段主流程：`Triage -> Analyze -> Review -> Act -> Report`。
 - 深度 review 策略：Context Expansion、Risk Modeling、Regression/Test Reasoning、Evidence Validation。
 - 工具系统：GitHub 读写工具、Memory 工具、测试生成工具、上下文扩展工具统一注册到 `ToolRouter`。
 - 安全执行：默认 dry-run；真实写操作失败不会阻塞 review 主流程。
@@ -71,11 +71,12 @@ CR-Agent/
 3. 如果是 repo-only，agent 会尝试读取默认分支最新提交区间。
 4. `GitEnvironment` 优先使用本机 Git 环境和本地 clone 生成 review context。
 5. 如果本机 Git 不可用，agent 使用 `GITHUB_TOKEN` 通过 GitHub API 获取 PR 或 commit context。
-6. `CodeReviewAgent` 执行四阶段流程：
+6. `CodeReviewAgent` 执行主流程：
    - `Triage`：判断 docs-only、draft、大变更、风险文件、是否需要人工介入。
    - `Analyze`：收集 diff、文件列表、CI、comments、依赖配置、相关测试、敏感路径和 memory。
    - `Review`：调用 LLM 输出结构化 JSON issues。
    - `Act`：dry-run 或真实执行 review comments、auto-fix PR、memory update 等动作。
+   - `Report`：加载 `code-review-report` skill，调用 LLM 生成 report draft，并写入 `report/`。
 7. `Evidence Validation` 在行动前过滤证据不足、行号不在 diff、重复或低置信度的问题。
 8. `TraceRecorder` 将完整运行轨迹写入 `cr_agent/data/traces/*.jsonl`。
 
@@ -106,6 +107,7 @@ GITHUB_TOKEN=
 CR_AGENT_DRY_RUN=true
 CR_AGENT_TRACE_DIR=data/traces
 CR_AGENT_MEMORY_DIR=data/memory
+CR_AGENT_REPORT_DIR=report
 CR_AGENT_MAX_ITERATIONS=30
 CR_AGENT_MAX_TOOL_RESULT_CHARS=12000
 CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD=2000
@@ -120,6 +122,7 @@ CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD=2000
 - `CR_AGENT_DRY_RUN`：默认建议 `true`，避免直接写 GitHub。
 - `CR_AGENT_TRACE_DIR`：trace 输出目录，相对 `cr_agent/` 工作目录。
 - `CR_AGENT_MEMORY_DIR`：memory 输出目录，相对 `cr_agent/` 工作目录。
+- `CR_AGENT_REPORT_DIR`：review report 输出目录；相对路径会解析到项目根目录，默认 `report/`。
 - `CR_AGENT_MAX_ITERATIONS`：agent tool-use 最大轮数。
 - `CR_AGENT_MAX_TOOL_RESULT_CHARS`：单次工具返回最大字符数。
 - `CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD`：超过该 changed lines 阈值时建议人工 review。
@@ -262,9 +265,27 @@ Inspect trace：
 Status: completed
 Summary: ...
 Trace: data/traces/<session>.jsonl
+Report: /path/to/CR-Agent/report/<session>-owner-repo.md
 Issues: 0
 Actions: 2
 ```
+
+## Report 输出
+
+每次 review 结束都会进入 `REPORT` 节点：
+
+1. 加载 `src/main/resources/skills/code-review-report/SKILL.md`。
+2. 把 session、repo、target、summary、issues、actions、trace path 传给 LLM。
+3. 要求 LLM 返回结构化 report draft JSON。
+4. 将最终 Markdown report 写入 `report/` 目录。
+
+默认输出位置：
+
+```text
+report/<session>-<owner-repo>.md
+```
+
+如果 Report 节点的 LLM 调用失败，agent 会写一份 deterministic fallback report；这不会影响主 review 的完成状态。
 
 Issue JSON schema 由 skill prompt 约束，核心字段包括：
 

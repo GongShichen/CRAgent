@@ -22,6 +22,7 @@ import com.cragent.util.Jsons;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -86,18 +87,7 @@ public class CodeReviewAgent {
             if (Boolean.TRUE.equals(triage.get("human_required")) || !Boolean.TRUE.equals(triage.get("should_review"))) {
                 reviewResult = skippedResult(triage);
                 actions = actOnTriageDecision(repo, pr, triage, reviewResult);
-                trace.record("session_end", Map.of("status", status, "summary", reviewResult.summary, "issues_found", reviewResult.issues.size(), "actions", actions));
-                AgentRunResult result = new AgentRunResult();
-                result.sessionId = trace.sessionId();
-                result.repo = repo;
-                result.pr = pr;
-                result.dryRun = settings.dryRun();
-                result.status = status;
-                result.summary = reviewResult.summary;
-                result.issues = reviewResult.issues;
-                result.actions = actions;
-                result.tracePath = trace.path();
-                return result;
+                return finishRun(repo, pr, status, reviewResult, actions, Map.of("target", "pull_request", "pr", pr));
             }
             Map<String, Object> analysis = analyze(repo, pr, triage);
             reviewResult = reviewPhase(repo, pr, triage, analysis);
@@ -112,18 +102,7 @@ public class CodeReviewAgent {
             reviewResult.summary = "Review failed: " + message;
             trace.record("error", Map.of("error", message, "exception", e.getClass().getName(), "stack_trace", stackTrace(e)));
         }
-        trace.record("session_end", Map.of("status", status, "summary", reviewResult.summary, "issues_found", reviewResult.issues.size(), "actions", actions));
-        AgentRunResult result = new AgentRunResult();
-        result.sessionId = trace.sessionId();
-        result.repo = repo;
-        result.pr = pr;
-        result.dryRun = settings.dryRun();
-        result.status = status;
-        result.summary = reviewResult.summary;
-        result.issues = reviewResult.issues;
-        result.actions = actions;
-        result.tracePath = trace.path();
-        return result;
+        return finishRun(repo, pr, status, reviewResult, actions, Map.of("target", "pull_request", "pr", pr));
     }
 
     public AgentRunResult reviewCommits(String repo, String base, String head) {
@@ -150,18 +129,7 @@ public class CodeReviewAgent {
             reviewResult.summary = "Review failed: " + message;
             trace.record("error", Map.of("error", message, "exception", e.getClass().getName(), "stack_trace", stackTrace(e)));
         }
-        trace.record("session_end", Map.of("status", status, "summary", reviewResult.summary, "issues_found", reviewResult.issues.size(), "actions", actions));
-        AgentRunResult result = new AgentRunResult();
-        result.sessionId = trace.sessionId();
-        result.repo = repo;
-        result.pr = 0;
-        result.dryRun = settings.dryRun();
-        result.status = status;
-        result.summary = reviewResult.summary;
-        result.issues = reviewResult.issues;
-        result.actions = actions;
-        result.tracePath = trace.path();
-        return result;
+        return finishRun(repo, 0, status, reviewResult, actions, Map.of("target", "commit_range", "base", base, "head", head));
     }
 
     public AgentRunResult reviewLocalGitCommits(String repo, String base, String head, List<Map<String, Object>> changedFiles,
@@ -189,17 +157,29 @@ public class CodeReviewAgent {
             reviewResult.summary = "Review failed: " + message;
             trace.record("error", Map.of("error", message, "exception", e.getClass().getName(), "stack_trace", stackTrace(e)));
         }
-        trace.record("session_end", Map.of("status", status, "summary", reviewResult.summary, "issues_found", reviewResult.issues.size(), "actions", actions));
+        return finishRun(repo, 0, status, reviewResult, actions, Map.of("target", "local_git_commit_range", "base", base, "head", head));
+    }
+
+    private AgentRunResult finishRun(String repo, int pr, String status, ReviewResult reviewResult,
+                                     List<Map<String, Object>> actions, Map<String, Object> target) {
         AgentRunResult result = new AgentRunResult();
         result.sessionId = trace.sessionId();
         result.repo = repo;
-        result.pr = 0;
+        result.pr = pr;
         result.dryRun = settings.dryRun();
         result.status = status;
         result.summary = reviewResult.summary;
         result.issues = reviewResult.issues;
         result.actions = actions;
         result.tracePath = trace.path();
+        result.reportPath = reportPhase(result, target);
+        trace.record("session_end", Map.of(
+                "status", status,
+                "summary", reviewResult.summary,
+                "issues_found", reviewResult.issues.size(),
+                "actions", actions,
+                "report_path", result.reportPath == null ? "" : result.reportPath.toString()
+        ));
         return result;
     }
 
@@ -478,6 +458,72 @@ public class CodeReviewAgent {
         }
         trace.record("phase_end", Map.of("phase", Phase.ACT.name(), "actions", actions));
         return actions;
+    }
+
+    private Path reportPhase(AgentRunResult result, Map<String, Object> target) {
+        trace.record("phase_start", Map.of("phase", Phase.REPORT.name()));
+        Map<String, Object> draft = new LinkedHashMap<>();
+        try {
+            String reportSkill = new SkillLoader().loadSkill("code-review-report", false);
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("session_id", result.sessionId);
+            payload.put("repo", result.repo);
+            payload.put("target", target);
+            payload.put("status", result.status);
+            payload.put("dry_run", result.dryRun);
+            payload.put("summary", result.summary);
+            payload.put("issues", result.issues);
+            payload.put("actions", result.actions);
+            payload.put("trace_path", result.tracePath == null ? "" : result.tracePath.toString());
+            payload.put("instruction", "Generate the final code review report draft according to the report skill output contract.");
+            List<ChatMessage> messages = List.of(
+                    new ChatMessage("system", reportSkill),
+                    new ChatMessage("user", Jsons.stringify(payload))
+            );
+            trace.record("llm_request", Map.of("phase", Phase.REPORT.name(), "iteration", 1, "messages", messages));
+            Map<String, Object> response = llm.chatJson(messages, List.of(), 0.1);
+            trace.record("llm_response", Map.of("phase", Phase.REPORT.name(), "iteration", 1, "response", response));
+            ChatMessage assistant = OpenAiCompatibleClient.assistantMessage(response);
+            if (assistant.content != null && !assistant.content.isBlank()) {
+                draft = Jsons.parseMap(assistant.content);
+            }
+        } catch (Exception e) {
+            trace.record("warning", Map.of(
+                    "phase", Phase.REPORT.name(),
+                    "warning", "Report LLM node failed; writing fallback report",
+                    "error", safeMessage(e)
+            ));
+            draft = fallbackReportDraft(result);
+        }
+
+        try {
+            Path path = new ReportWriter(settings.reportDir()).write(result, target, draft);
+            trace.record("report_written", Map.of("phase", Phase.REPORT.name(), "path", path.toString()));
+            trace.record("phase_end", Map.of("phase", Phase.REPORT.name(), "path", path.toString()));
+            return path;
+        } catch (Exception e) {
+            trace.record("warning", Map.of(
+                    "phase", Phase.REPORT.name(),
+                    "warning", "Unable to write report",
+                    "error", safeMessage(e)
+            ));
+            trace.record("phase_end", Map.of("phase", Phase.REPORT.name(), "error", safeMessage(e)));
+            return null;
+        }
+    }
+
+    private static Map<String, Object> fallbackReportDraft(AgentRunResult result) {
+        Map<String, Object> draft = new LinkedHashMap<>();
+        draft.put("title", "Code Review Report: " + result.repo);
+        draft.put("executive_summary", result.summary == null || result.summary.isBlank() ? "No summary was generated." : result.summary);
+        draft.put("risk_assessment", result.issues.isEmpty()
+                ? "No actionable issues were found in the final validated issue list."
+                : "The final validated issue list contains " + result.issues.size() + " issue(s). Review severity and evidence before merging.");
+        draft.put("test_assessment", "See the Issues section for any test-specific findings generated by the review node.");
+        draft.put("key_findings", result.issues.stream().map(issue -> issue.severity + " " + issue.category + " in " + issue.file).toList());
+        draft.put("actions_taken", result.actions.stream().map(action -> String.valueOf(action.getOrDefault("name", "action"))).toList());
+        draft.put("recommendation", result.issues.isEmpty() ? "No blocking issues found." : "Address the listed findings or explicitly accept the residual risk.");
+        return draft;
     }
 
     private ToolResult call(String name, Map<String, Object> args) {

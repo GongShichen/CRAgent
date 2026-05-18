@@ -1,5 +1,7 @@
 package com.cragent.config;
 
+import com.cragent.util.ProjectPaths;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -14,6 +16,7 @@ public record Settings(
         boolean dryRun,
         Path traceDir,
         Path memoryDir,
+        Path reportDir,
         int maxIterations,
         int maxToolResultChars,
         int humanReviewChangedLinesThreshold
@@ -37,7 +40,7 @@ public record Settings(
     }
 
     public Settings withDryRun(boolean value) {
-        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, githubToken, value, traceDir, memoryDir,
+        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, githubToken, value, traceDir, memoryDir, reportDir,
                 maxIterations, maxToolResultChars, humanReviewChangedLinesThreshold);
     }
 
@@ -50,10 +53,16 @@ public record Settings(
                 Boolean.parseBoolean(env.getOrDefault("CR_AGENT_DRY_RUN", "true")),
                 Path.of(env.getOrDefault("CR_AGENT_TRACE_DIR", "data/traces")),
                 Path.of(env.getOrDefault("CR_AGENT_MEMORY_DIR", "data/memory")),
+                resolveRepoPath(env.getOrDefault("CR_AGENT_REPORT_DIR", "report")),
                 Integer.parseInt(env.getOrDefault("CR_AGENT_MAX_ITERATIONS", "30")),
                 Integer.parseInt(env.getOrDefault("CR_AGENT_MAX_TOOL_RESULT_CHARS", "12000")),
                 Integer.parseInt(env.getOrDefault("CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD", "2000"))
         );
+    }
+
+    private static Path resolveRepoPath(String value) {
+        Path path = Path.of(value);
+        return path.isAbsolute() ? path : ProjectPaths.repoRoot().resolve(path).normalize();
     }
 
     public boolean hasLlmCredentials() {

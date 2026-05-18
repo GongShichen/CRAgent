@@ -4,6 +4,6 @@ public enum Phase {
     TRIAGE,
     ANALYZE,
     REVIEW,
-    ACT
+    ACT,
+    REPORT
 }
-

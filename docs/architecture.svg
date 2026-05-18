@@ -64,25 +64,30 @@
 
   <rect class="box core" x="455" y="520" width="690" height="235"/>
   <text class="section" x="485" y="560">CodeReviewAgent Pipeline</text>
-  <rect class="box phase" x="485" y="590" width="140" height="110"/>
-  <text class="label" x="514" y="632">Triage</text>
+  <rect class="box phase" x="485" y="590" width="115" height="110"/>
+  <text class="label" x="510" y="632">Triage</text>
   <text class="tiny" x="505" y="662">risk gates</text>
-  <text class="tiny" x="505" y="684">docs/large PR</text>
-  <rect class="box phase" x="650" y="590" width="140" height="110"/>
-  <text class="label" x="677" y="632">Analyze</text>
-  <text class="tiny" x="670" y="662">context</text>
-  <text class="tiny" x="670" y="684">risk model</text>
-  <rect class="box phase" x="815" y="590" width="140" height="110"/>
-  <text class="label" x="844" y="632">Review</text>
-  <text class="tiny" x="835" y="662">JSON issues</text>
-  <text class="tiny" x="835" y="684">test reasoning</text>
-  <rect class="box phase" x="980" y="590" width="140" height="110"/>
-  <text class="label" x="1019" y="632">Act</text>
-  <text class="tiny" x="1000" y="662">comments</text>
-  <text class="tiny" x="1000" y="684">memory/fix PR</text>
-  <path class="line" d="M625 645 H645"/>
-  <path class="line" d="M790 645 H810"/>
-  <path class="line" d="M955 645 H975"/>
+  <text class="tiny" x="505" y="684">large PR</text>
+  <rect class="box phase" x="620" y="590" width="115" height="110"/>
+  <text class="label" x="641" y="632">Analyze</text>
+  <text class="tiny" x="640" y="662">context</text>
+  <text class="tiny" x="640" y="684">risk model</text>
+  <rect class="box phase" x="755" y="590" width="115" height="110"/>
+  <text class="label" x="779" y="632">Review</text>
+  <text class="tiny" x="775" y="662">JSON issues</text>
+  <text class="tiny" x="775" y="684">tests</text>
+  <rect class="box phase" x="890" y="590" width="115" height="110"/>
+  <text class="label" x="930" y="632">Act</text>
+  <text class="tiny" x="910" y="662">comments</text>
+  <text class="tiny" x="910" y="684">memory</text>
+  <rect class="box phase" x="1025" y="590" width="115" height="110"/>
+  <text class="label" x="1050" y="632">Report</text>
+  <text class="tiny" x="1045" y="662">skill node</text>
+  <text class="tiny" x="1045" y="684">markdown</text>
+  <path class="line" d="M600 645 H615"/>
+  <path class="line" d="M735 645 H750"/>
+  <path class="line" d="M870 645 H885"/>
+  <path class="line" d="M1005 645 H1020"/>
   <text class="small" x="485" y="733">Evidence validation filters weak findings, validates diff lines, deduplicates issues, and calibrates severity.</text>
 
   <rect class="box tool" x="1210" y="165" width="310" height="180"/>

@@ -29,6 +29,7 @@ cr_agent/.idea/dictionaries/
 cr_agent/data/
 /data/
 /memory/
+/report/
 
 # Training artifacts
 model/*/

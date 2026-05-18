@@ -186,7 +186,7 @@ class JavaAgentTest {
     }
 
     @Test
-    void fullAgentDryRunWithFakeLlm() {
+    void fullAgentDryRunWithFakeLlm() throws Exception {
         Settings settings = new Settings(
                 "https://token-plan-cn.xiaomimimo.com/v1",
                 "",
@@ -195,6 +195,7 @@ class JavaAgentTest {
                 true,
                 tmp.resolve("traces"),
                 tmp.resolve("memory"),
+                tmp.resolve("report"),
                 30,
                 12000,
                 2000
@@ -203,6 +204,9 @@ class JavaAgentTest {
         assertEquals("completed", result.status);
         assertFalse(result.issues.isEmpty());
         assertTrue(result.tracePath.toFile().exists());
+        assertNotNull(result.reportPath);
+        assertTrue(result.reportPath.toFile().exists());
+        assertTrue(Files.readString(result.reportPath).contains("Code Review Report"));
     }
 
     @Test
@@ -215,6 +219,7 @@ class JavaAgentTest {
                 true,
                 tmp.resolve("quality-traces"),
                 tmp.resolve("quality-memory"),
+                tmp.resolve("quality-report"),
                 30,
                 12000,
                 2000
@@ -248,6 +253,7 @@ class JavaAgentTest {
                 true,
                 tmp.resolve("fp-traces"),
                 tmp.resolve("fp-memory"),
+                tmp.resolve("fp-report"),
                 30,
                 12000,
                 2000
@@ -284,6 +290,7 @@ class JavaAgentTest {
                 true,
                 tmp.resolve("fix-traces"),
                 tmp.resolve("fix-memory"),
+                tmp.resolve("fix-report"),
                 30,
                 12000,
                 2000
@@ -316,6 +323,7 @@ class JavaAgentTest {
                 false,
                 tmp.resolve("live-memory-traces"),
                 tmp.resolve("live-memory"),
+                tmp.resolve("live-report"),
                 30,
                 12000,
                 2000
@@ -349,6 +357,7 @@ class JavaAgentTest {
                 true,
                 tmp.resolve("commit-traces"),
                 tmp.resolve("commit-memory"),
+                tmp.resolve("commit-report"),
                 30,
                 12000,
                 2000
@@ -356,6 +365,8 @@ class JavaAgentTest {
         AgentRunResult result = testAgent(settings, new FakeLlmClient()).reviewCommits("owner/repo", "base-sha", "head-sha");
         assertEquals("completed", result.status);
         assertTrue(result.tracePath.toFile().exists());
+        assertNotNull(result.reportPath);
+        assertTrue(result.reportPath.toFile().exists());
     }
 
 
@@ -404,11 +415,12 @@ class JavaAgentTest {
     @Test
     void settingsLoadExplicitEnvFile() throws Exception {
         Path env = tmp.resolve(".env");
-        Files.writeString(env, "OPENAI_BASE_URL=https://example.test/v1\nOPENAI_API_KEY=secret\nOPENAI_MODEL=model-x\nCR_AGENT_DRY_RUN=false\nCR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD=1234\n", StandardCharsets.UTF_8);
+        Files.writeString(env, "OPENAI_BASE_URL=https://example.test/v1\nOPENAI_API_KEY=secret\nOPENAI_MODEL=model-x\nCR_AGENT_DRY_RUN=false\nCR_AGENT_REPORT_DIR=custom-report\nCR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD=1234\n", StandardCharsets.UTF_8);
         Settings settings = Settings.load(env);
         assertEquals("https://example.test/v1", settings.openaiBaseUrl());
         assertEquals("secret", settings.openaiApiKey());
         assertEquals("model-x", settings.openaiModel());
+        assertTrue(settings.reportDir().endsWith("custom-report"));
         assertEquals(1234, settings.humanReviewChangedLinesThreshold());
         assertTrue(settings.hasLlmCredentials());
         assertFalse(settings.dryRun());
@@ -440,10 +452,10 @@ class JavaAgentTest {
     @Test
     void exportsSftAndDpoDatasets() throws Exception {
         Path traces = tmp.resolve("traces");
-        Settings good = new Settings("url", "", "model", "", true, traces, tmp.resolve("memory"), 30, 12000, 2000);
+        Settings good = new Settings("url", "", "model", "", true, traces, tmp.resolve("memory"), tmp.resolve("report"), 30, 12000, 2000);
         testAgent(good, new FakeLlmClient()).review("owner/repo", 1);
 
-        Settings bad = new Settings("url", "", "model", "", true, traces, tmp.resolve("memory2"), 0, 12000, 2000);
+        Settings bad = new Settings("url", "", "model", "", true, traces, tmp.resolve("memory2"), tmp.resolve("report2"), 0, 12000, 2000);
         testAgent(bad, new FakeLlmClient()).review("owner/repo", 2);
 
         TraceDatasetExporter exporter = new TraceDatasetExporter();

@@ -123,6 +123,9 @@ public class CrAgentCli {
         System.out.println("Status: " + result.status);
         System.out.println("Summary: " + result.summary);
         System.out.println("Trace: " + result.tracePath);
+        if (result.reportPath != null) {
+            System.out.println("Report: " + result.reportPath);
+        }
         System.out.println("Issues: " + result.issues.size());
         for (ReviewIssue issue : result.issues) {
             System.out.printf("- [%s] %s %s:%s %s%n", issue.severity, issue.category, issue.file, issue.line, issue.body);

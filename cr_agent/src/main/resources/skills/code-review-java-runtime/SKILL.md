@@ -8,10 +8,11 @@ description: |
 
 # Java Code Review Runtime Contract
 
-This Java agent already performs `Triage -> Analyze -> Review -> Act` outside the
-model. During the Review phase, focus on producing precise review findings from
-the provided `triage` and `analysis` JSON. Do not restate the workflow or produce
-a human-facing final report.
+This Java agent already performs `Triage -> Analyze -> Review -> Act -> Report`
+outside the Review model call. During the Review phase, focus on producing
+precise review findings from the provided `triage` and `analysis` JSON. Do not
+restate the workflow or produce a human-facing final report; the dedicated
+Report node loads `code-review-report` and writes the final Markdown report.
 
 ## Output Contract
 

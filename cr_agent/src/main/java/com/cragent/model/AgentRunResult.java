@@ -15,5 +15,5 @@ public class AgentRunResult {
     public List<ReviewIssue> issues = new ArrayList<>();
     public List<Map<String, Object>> actions = new ArrayList<>();
     public Path tracePath;
+    public Path reportPath;
 }
-
