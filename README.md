@@ -11,7 +11,7 @@ CR-Agent 是一个 Java 实现的 agentic code review 系统。它可以通过�
 - 自然语言 chat 入口：可以直接输入 GitHub 仓库、PR 链接、`owner/repo`、compare URL、两个 commit 或分支名。
 - PR review：读取 GitHub PR 元信息、diff、changed files、review comments、CI checks 和仓库上下文。
 - Commit range review：支持 `base...head`，也支持只给仓库时默认审查默认分支最新提交区间。
-- 本机 Git 优先：优先使用本机 clone、SSH/HTTPS Git 环境生成 diff；`GITHUB_TOKEN` 作为 GitHub API fallback。
+- 本机 Git 优先：优先使用本机 clone；如果没有本地 clone，会临时 clone 到 `target-project/` 生成 diff 并在结束后清理；`GITHUB_TOKEN` 作为 GitHub API fallback。
 - 五阶段主流程：`Triage -> Analyze -> Review -> Act -> Report`。
 - 深度 review 策略：Context Expansion、Risk Modeling、Regression/Test Reasoning、Evidence Validation。
 - 工具系统：GitHub 读写工具、Memory 工具、测试生成工具、上下文扩展工具统一注册到 `ToolRouter`。
@@ -70,15 +70,16 @@ CR-Agent/
 2. `ChatCommandParser` 从自然语言中识别 PR、仓库、commit range、compare URL 或 repo-only 请求。
 3. 如果是 repo-only，agent 会尝试读取默认分支最新提交区间。
 4. `GitEnvironment` 优先使用本机 Git 环境和本地 clone 生成 review context。
-5. 如果本机 Git 不可用，agent 使用 `GITHUB_TOKEN` 通过 GitHub API 获取 PR 或 commit context。
-6. `CodeReviewAgent` 执行主流程：
+5. 如果本机没有 clone，agent 会临时 clone 到项目根的 `target-project/`，生成上下文后无论成功失败都会清理。
+6. 如果本机 Git/临时 clone 不可用，agent 使用 `GITHUB_TOKEN` 通过 GitHub API 获取 PR 或 commit context。
+7. `CodeReviewAgent` 执行主流程：
    - `Triage`：判断 docs-only、draft、大变更、风险文件、是否需要人工介入。
    - `Analyze`：收集 diff、文件列表、CI、comments、依赖配置、相关测试、敏感路径和 memory。
    - `Review`：调用 LLM 输出结构化 JSON issues。
    - `Act`：dry-run 或真实执行 review comments、auto-fix PR、memory update 等动作。
    - `Report`：加载 `code-review-report` skill，调用 LLM 生成 report draft，并写入 `report/`。
-7. `Evidence Validation` 在行动前过滤证据不足、行号不在 diff、重复或低置信度的问题。
-8. `TraceRecorder` 将完整运行轨迹写入 `cr_agent/data/traces/*.jsonl`。
+8. `Evidence Validation` 在行动前过滤证据不足、行号不在 diff、重复或低置信度的问题。
+9. `TraceRecorder` 将完整运行轨迹写入 `cr_agent/data/traces/*.jsonl`。
 
 ## 配置
 
@@ -425,7 +426,7 @@ cd cr_agent
 帮我 review https://github.com/GongShichen/JTravelAgent.git
 ```
 
-如果本机存在该仓库 clone，agent 会优先使用本机 Git 生成 diff；否则尝试使用 GitHub API。
+如果本机存在该仓库 clone，agent 会优先使用本机 Git 生成 diff；否则会临时 clone 到 `target-project/`，生成上下文后自动删除；如果 clone 不可用，再尝试使用 GitHub API。
 
 ## 安全建议
 

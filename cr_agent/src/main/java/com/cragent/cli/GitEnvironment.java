@@ -1,7 +1,11 @@
 package com.cragent.cli;
 
+import com.cragent.util.ProjectPaths;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -94,21 +98,83 @@ public final class GitEnvironment {
 
     public static LocalReviewContext localReviewContext(String repo, String base, String head) {
         java.nio.file.Path path = findLocalRepository(repo);
+        Path cleanupPath = null;
+        boolean temporaryClone = false;
+        if (path == null) {
+            CloneResult clone = cloneRepository(repo);
+            if (clone != null) {
+                path = clone.repoPath();
+                cleanupPath = clone.cleanupPath();
+                temporaryClone = true;
+            }
+        }
         if (path == null) {
             return null;
         }
-        runIn(path, Duration.ofSeconds(45), "git", "fetch", "--quiet", "--all", "--prune");
-        String diff = runIn(path, Duration.ofSeconds(30), "git", "diff", "--find-renames", "--unified=80", base, head).stdout();
-        String numstat = runIn(path, Duration.ofSeconds(15), "git", "diff", "--numstat", "--find-renames", base, head).stdout();
-        String names = runIn(path, Duration.ofSeconds(15), "git", "diff", "--name-status", "--find-renames", base, head).stdout();
-        String commits = runIn(path, Duration.ofSeconds(15), "git", "log", "--format=%H%x09%an%x09%ae%x09%s", base + ".." + head).stdout();
-        String author = "unknown";
-        String firstCommit = commits == null ? "" : commits.lines().findFirst().orElse("");
-        String[] parts = firstCommit.split("\\t");
-        if (parts.length >= 2 && !parts[1].isBlank()) {
-            author = parts[1];
+        try {
+            runIn(path, Duration.ofSeconds(45), "git", "fetch", "--quiet", "--all", "--prune");
+            String diff = runIn(path, Duration.ofSeconds(30), "git", "diff", "--find-renames", "--unified=80", base, head).stdout();
+            String numstat = runIn(path, Duration.ofSeconds(15), "git", "diff", "--numstat", "--find-renames", base, head).stdout();
+            String names = runIn(path, Duration.ofSeconds(15), "git", "diff", "--name-status", "--find-renames", base, head).stdout();
+            String commits = runIn(path, Duration.ofSeconds(15), "git", "log", "--format=%H%x09%an%x09%ae%x09%s", base + ".." + head).stdout();
+            String author = "unknown";
+            String firstCommit = commits == null ? "" : commits.lines().findFirst().orElse("");
+            String[] parts = firstCommit.split("\\t");
+            if (parts.length >= 2 && !parts[1].isBlank()) {
+                author = parts[1];
+            }
+            return new LocalReviewContext(path, changedFiles(numstat, names, diff), diff, commitRows(commits), author, temporaryClone);
+        } finally {
+            if (cleanupPath != null) {
+                try {
+                    deleteRecursively(cleanupPath);
+                } catch (IOException ignored) {
+                    // Best effort cleanup.
+                }
+            }
         }
-        return new LocalReviewContext(path, changedFiles(numstat, names, diff), diff, commitRows(commits), author);
+    }
+
+    private static CloneResult cloneRepository(String repo) {
+        String normalized = ChatCommandParser.normalizeRepo(repo);
+        if (normalized == null) {
+            return null;
+        }
+        Path root = ProjectPaths.repoRoot().resolve("target-project").normalize();
+        Path target = root.resolve(normalized.replace("/", "__")).normalize();
+        try {
+            if (Files.exists(target)) {
+                deleteRecursively(target);
+            }
+            Files.createDirectories(root);
+        } catch (IOException e) {
+            return null;
+        }
+        String sshUrl = "git@github.com:" + normalized + ".git";
+        String httpsUrl = "https://github.com/" + normalized + ".git";
+        CommandResult clone = run(Duration.ofMinutes(3), "git", "clone", "--quiet", sshUrl, target.toString());
+        if (clone.exitCode() == 0) {
+            return new CloneResult(target, root);
+        }
+        if (Files.exists(target)) {
+            try {
+                deleteRecursively(target);
+            } catch (IOException ignored) {
+                return null;
+            }
+        }
+        clone = run(Duration.ofMinutes(3), "git", "clone", "--quiet", httpsUrl, target.toString());
+        if (clone.exitCode() == 0) {
+            return new CloneResult(target, root);
+        }
+        if (Files.exists(root)) {
+            try {
+                deleteRecursively(root);
+            } catch (IOException ignored) {
+                // Best effort cleanup.
+            }
+        }
+        return null;
     }
 
     private static String parentFromTemporaryFetch(String url, String headSha) {
@@ -292,7 +358,10 @@ public final class GitEnvironment {
     }
 
     public record LocalReviewContext(java.nio.file.Path repoPath, java.util.List<java.util.Map<String, Object>> changedFiles, String diff,
-                                     java.util.List<java.util.Map<String, Object>> commits, String author) {
+                                     java.util.List<java.util.Map<String, Object>> commits, String author, boolean temporaryClone) {
+    }
+
+    private record CloneResult(Path repoPath, Path cleanupPath) {
     }
 
     private record CommandResult(int exitCode, String stdout, String stderr) {

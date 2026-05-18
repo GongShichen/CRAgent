@@ -243,7 +243,11 @@ public class CrAgentCli {
     private static AgentRunResult reviewCommitRange(Settings settings, LlmClient llm, String repo, String base, String head) {
         GitEnvironment.LocalReviewContext local = GitEnvironment.localReviewContext(repo, base, head);
         if (local != null) {
-            System.out.println("使用本机 Git 仓库生成 review 上下文: " + local.repoPath());
+            if (local.temporaryClone()) {
+                System.out.println("本机未找到 clone，已临时 clone 到 target-project/ 生成 review 上下文并完成清理: " + local.repoPath());
+            } else {
+                System.out.println("使用本机 Git 仓库生成 review 上下文: " + local.repoPath());
+            }
             return new CodeReviewAgent(settings, llm).reviewLocalGitCommits(repo, base, head, local.changedFiles(), local.diff(), local.commits(), local.author());
         }
         if (!settings.hasGithubCredentials()) {

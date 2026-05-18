@@ -30,6 +30,7 @@ cr_agent/data/
 /data/
 /memory/
 /report/
+/target-project/
 
 # Training artifacts
 model/*/
