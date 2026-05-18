@@ -1,0 +1,39 @@
+.env
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Java / Gradle
+cr_agent/.gradle/
+cr_agent/build/
+cr_agent/.kotlin/
+cr_agent/out/
+!cr_agent/gradle/wrapper/gradle-wrapper.jar
+
+# IDE local state
+cr_agent/.idea/
+cr_agent/.idea/workspace.xml
+cr_agent/.idea/shelf/
+cr_agent/.idea/tasks.xml
+cr_agent/.idea/usage.statistics.xml
+cr_agent/.idea/dictionaries/
+*.iws
+*.iml
+*.ipr
+.vscode/
+
+# Runtime data and traces
+cr_agent/data/
+/data/
+/memory/
+
+# Training artifacts
+model/*/
+!model/.gitkeep
+datasets/SFT/*.jsonl
+datasets/DPO/*.jsonl
+!datasets/SFT/.gitkeep
+!datasets/DPO/.gitkeep
