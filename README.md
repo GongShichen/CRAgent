@@ -251,8 +251,8 @@ cd cr_agent
 示例任务描述：
 
 ```text
-帮我 review https://github.com/GongShichen/JTravelAgent.git
-对整个 https://github.com/GongShichen/JTravelAgent.git 做 CR
+帮我 review https://github.com/owner/repo.git
+对整个 https://github.com/owner/repo.git 做 CR
 review https://github.com/owner/name/pull/123
 review owner/name 从 main 到 feature-branch
 review https://github.com/owner/name/compare/main...feature-branch
@@ -430,7 +430,7 @@ cd cr_agent
 然后输入：
 
 ```text
-帮我 review https://github.com/GongShichen/JTravelAgent.git
+帮我 review https://github.com/owner/repo.git
 ```
 
 如果本机存在该仓库 clone，agent 会优先使用本机 Git 生成 diff；否则会临时 clone 到 `target-project/`，生成上下文后自动删除；如果 clone 不可用，再尝试使用 GitHub API。
