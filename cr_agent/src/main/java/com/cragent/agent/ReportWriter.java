@@ -9,8 +9,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.StringJoiner;
 
 public class ReportWriter {
     private final Path reportDir;
@@ -21,7 +24,8 @@ public class ReportWriter {
 
     public Path write(AgentRunResult result, Map<String, Object> target, Map<String, Object> draft) throws IOException {
         Files.createDirectories(reportDir);
-        String filename = result.sessionId + "-" + safeName(result.repo) + ".md";
+        String suffix = target != null && "repo_audit".equals(String.valueOf(target.get("target"))) ? "-repo-audit" : "";
+        String filename = result.sessionId + "-" + safeName(result.repo) + suffix + ".md";
         Path path = reportDir.resolve(filename);
         Files.writeString(path, render(result, target, draft), StandardCharsets.UTF_8);
         return path;
@@ -36,13 +40,8 @@ public class ReportWriter {
 
         StringBuilder out = new StringBuilder();
         out.append("# ").append(title).append("\n\n");
-        out.append("- Generated at: ").append(Instant.now()).append("\n");
-        out.append("- Session: `").append(result.sessionId).append("`\n");
-        out.append("- Repository: `").append(result.repo).append("`\n");
-        appendTarget(out, target);
-        out.append("- Status: `").append(result.status).append("`\n");
-        out.append("- Dry run: `").append(result.dryRun).append("`\n");
-        out.append("- Trace: `").append(result.tracePath).append("`\n\n");
+        appendRunMetadata(out, result, target);
+        appendContextSummary(out, target);
 
         out.append("## Executive Summary\n\n").append(executiveSummary).append("\n\n");
         out.append("## Risk Assessment\n\n").append(riskAssessment).append("\n\n");
@@ -51,19 +50,10 @@ public class ReportWriter {
         if (result.issues.isEmpty()) {
             out.append("No actionable issues were found.\n\n");
         } else {
-            for (ReviewIssue issue : result.issues) {
-                out.append("- `").append(issue.severity).append("` `").append(issue.category).append("` ");
-                out.append(nullToUnknown(issue.file)).append(":").append(issue.line == null ? "?" : issue.line).append(" - ");
-                out.append(nullToEmpty(issue.body)).append("\n");
-                if (issue.evidence != null && !issue.evidence.isBlank()) {
-                    out.append("  - Evidence: ").append(issue.evidence).append("\n");
-                }
-                if (issue.impact != null && !issue.impact.isBlank()) {
-                    out.append("  - Impact: ").append(issue.impact).append("\n");
-                }
-                if (issue.suggestion != null && !issue.suggestion.isBlank()) {
-                    out.append("  - Suggestion: ").append(issue.suggestion).append("\n");
-                }
+            appendIssueSummaryTable(out, result.issues);
+            int index = 1;
+            for (ReviewIssue issue : result.issues.stream().sorted(Comparator.comparingInt(ReportWriter::severityRank)).toList()) {
+                appendIssue(out, index++, issue);
             }
             out.append("\n");
         }
@@ -73,11 +63,8 @@ public class ReportWriter {
             out.append("No actions were taken.\n\n");
         } else {
             for (Map<String, Object> action : result.actions) {
-                out.append("- `").append(action.getOrDefault("name", "action")).append("`");
-                Object actionResult = action.get("result");
-                if (actionResult != null) {
-                    out.append(": ").append(actionResult);
-                }
+                out.append("### `").append(action.getOrDefault("name", "action")).append("`\n\n");
+                appendJsonBlock(out, action, "json");
                 out.append("\n");
             }
             out.append("\n");
@@ -85,17 +72,162 @@ public class ReportWriter {
 
         out.append("## Recommendation\n\n").append(recommendation).append("\n\n");
         if (draft != null && !draft.isEmpty()) {
-            out.append("## Report Draft JSON\n\n```json\n").append(Jsons.pretty(draft)).append("\n```\n");
+            appendDetailsJson(out, "Report Draft JSON", draft);
         }
         return out.toString();
     }
 
-    private static void appendTarget(StringBuilder out, Map<String, Object> target) {
+    private static void appendRunMetadata(StringBuilder out, AgentRunResult result, Map<String, Object> target) {
+        out.append("## Run Metadata\n\n");
+        out.append("| Field | Value |\n");
+        out.append("| --- | --- |\n");
+        row(out, "Generated at", "`" + Instant.now() + "`");
+        row(out, "Session", "`" + result.sessionId + "`");
+        row(out, "Repository", "`" + result.repo + "`");
+        row(out, "Status", "`" + result.status + "`");
+        row(out, "Dry run", "`" + result.dryRun + "`");
+        row(out, "Trace", "`" + result.tracePath + "`");
+        if (target != null) {
+            for (Map.Entry<String, Object> entry : target.entrySet()) {
+                if (isScalar(entry.getValue())) {
+                    row(out, entry.getKey(), "`" + markdownEscape(String.valueOf(entry.getValue())) + "`");
+                }
+            }
+        }
+        out.append("\n");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void appendContextSummary(StringBuilder out, Map<String, Object> target) {
         if (target == null || target.isEmpty()) {
             return;
         }
+        out.append("## Context Summary\n\n");
+        Object coverage = target.get("coverage_summary");
+        if (coverage instanceof Map<?, ?> map) {
+            out.append("### Coverage\n\n");
+            out.append("| Metric | Value |\n");
+            out.append("| --- | ---: |\n");
+            row(out, "Files total", inlineValue(map.get("files_total")));
+            row(out, "Reviewable files", inlineValue(map.get("reviewable_files")));
+            row(out, "Slices total", inlineValue(map.get("slices_total")));
+            Object statusCounts = map.get("status_counts");
+            if (statusCounts instanceof Map<?, ?> statusMap) {
+                for (Map.Entry<?, ?> entry : statusMap.entrySet()) {
+                    row(out, "Status: " + entry.getKey(), inlineValue(entry.getValue()));
+                }
+            }
+            Object skipReasons = map.get("skip_reasons");
+            if (skipReasons instanceof Map<?, ?> skipMap && !skipMap.isEmpty()) {
+                for (Map.Entry<?, ?> entry : skipMap.entrySet()) {
+                    row(out, "Skipped: " + entry.getKey(), inlineValue(entry.getValue()));
+                }
+            }
+            out.append("\n");
+        }
+
+        Object risk = target.get("risk_model");
+        if (risk instanceof Map<?, ?> rawRisk) {
+            out.append("### Risk Model\n\n");
+            out.append("| Field | Value |\n");
+            out.append("| --- | --- |\n");
+            row(out, "Risk level", inlineValue(rawRisk.get("risk_level")));
+            row(out, "LSP status", inlineValue(rawRisk.get("lsp_status")));
+            row(out, "LSP symbol count", inlineValue(rawRisk.get("lsp_symbol_count")));
+            row(out, "Stack", inlineValue(rawRisk.get("stack")));
+            row(out, "Sensitive files", inlineValue(rawRisk.get("sensitive_files")));
+            out.append("\n");
+        }
+
+        Object checks = target.get("static_checks");
+        if (checks instanceof List<?> list && !list.isEmpty()) {
+            out.append("### Static Checks\n\n");
+            out.append("| Command | Status | Exit Code |\n");
+            out.append("| --- | --- | ---: |\n");
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> check) {
+                    row(out, check.get("command"), check.get("status"), check.get("exit_code"));
+                }
+            }
+            out.append("\n");
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> check && check.get("output") != null) {
+                    out.append("<details>\n<summary>`").append(markdownEscape(String.valueOf(check.get("command")))).append("` output</summary>\n\n");
+                    appendFence(out, String.valueOf(check.get("output")).stripTrailing(), "text");
+                    out.append("\n</details>\n\n");
+                }
+            }
+        }
+
+        Object lsp = target.get("lsp_context");
+        if (lsp instanceof Map<?, ?> rawLsp) {
+            out.append("### LSP\n\n");
+            out.append("| Field | Value |\n");
+            out.append("| --- | --- |\n");
+            row(out, "Enabled", inlineValue(rawLsp.get("enabled")));
+            row(out, "Status", inlineValue(rawLsp.get("status")));
+            row(out, "Symbol count", inlineValue(rawLsp.get("symbol_count")));
+            row(out, "Errors", inlineValue(rawLsp.get("errors")));
+            out.append("\n");
+        }
+
+        appendDetailsJson(out, "Full Context JSON", compactTarget(target));
+    }
+
+    private static Map<String, Object> compactTarget(Map<String, Object> target) {
+        Map<String, Object> compact = new LinkedHashMap<>();
         for (Map.Entry<String, Object> entry : target.entrySet()) {
-            out.append("- ").append(entry.getKey()).append(": `").append(entry.getValue()).append("`\n");
+            if ("shared_analysis".equals(entry.getKey())) {
+                compact.put(entry.getKey(), entry.getValue());
+            } else if (!isScalar(entry.getValue())) {
+                compact.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return compact;
+    }
+
+    private static void appendIssueSummaryTable(StringBuilder out, List<ReviewIssue> issues) {
+        out.append("| # | Severity | Category | Location | Finding |\n");
+        out.append("| ---: | --- | --- | --- | --- |\n");
+        int i = 1;
+        for (ReviewIssue issue : issues.stream().sorted(Comparator.comparingInt(ReportWriter::severityRank)).toList()) {
+            row(out,
+                    i++,
+                    "`" + nullToUnknown(issue.severity == null ? null : issue.severity.name()) + "`",
+                    "`" + markdownEscape(nullToUnknown(issue.category)) + "`",
+                    "`" + markdownEscape(location(issue)) + "`",
+                    markdownEscape(firstSentence(redact(nullToEmpty(issue.body)), 140)));
+        }
+        out.append("\n");
+    }
+
+    private static void appendIssue(StringBuilder out, int index, ReviewIssue issue) {
+        out.append("### ").append(index).append(". `")
+                .append(issue.severity == null ? "unknown" : issue.severity.name())
+                .append("` ")
+                .append(markdownEscape(nullToUnknown(issue.category)))
+                .append(" - `").append(markdownEscape(location(issue))).append("`\n\n");
+        out.append(redact(nullToEmpty(issue.body))).append("\n\n");
+        out.append("| Field | Value |\n");
+        out.append("| --- | --- |\n");
+        row(out, "Confidence", "`" + issue.confidence + "`");
+        row(out, "Auto-fixable", "`" + issue.autoFixable + "`");
+        out.append("\n");
+        if (issue.evidence != null && !issue.evidence.isBlank()) {
+            out.append("**Evidence**\n\n");
+            appendFence(out, redact(issue.evidence.strip()), languageForPath(issue.file));
+            out.append("\n");
+        }
+        if (issue.impact != null && !issue.impact.isBlank()) {
+            out.append("**Impact**\n\n").append(redact(issue.impact)).append("\n\n");
+        }
+        if (issue.suggestion != null && !issue.suggestion.isBlank()) {
+            out.append("**Suggestion**\n\n").append(redact(issue.suggestion)).append("\n\n");
+        }
+        if (issue.fixCode != null && !issue.fixCode.isBlank()) {
+            out.append("**Suggested Patch**\n\n");
+            appendFence(out, redact(issue.fixCode.strip()), languageForPath(issue.file));
+            out.append("\n");
         }
     }
 
@@ -119,6 +251,113 @@ public class ReportWriter {
 
     private static String safeName(String repo) {
         return (repo == null || repo.isBlank() ? "unknown" : repo).replaceAll("[^A-Za-z0-9._-]+", "-");
+    }
+
+    private static void appendDetailsJson(StringBuilder out, String title, Object value) {
+        if (value == null) {
+            return;
+        }
+        out.append("<details>\n<summary>").append(markdownEscape(title)).append("</summary>\n\n");
+        appendJsonBlock(out, value, "json");
+        out.append("\n</details>\n\n");
+    }
+
+    private static void appendJsonBlock(StringBuilder out, Object value, String language) {
+        appendFence(out, redact(Jsons.pretty(value)), language);
+    }
+
+    private static void appendFence(StringBuilder out, String content, String language) {
+        String body = content == null ? "" : content;
+        String fence = body.contains("```") ? "````" : "```";
+        out.append(fence).append(language == null || language.isBlank() ? "" : language).append("\n");
+        out.append(body).append("\n");
+        out.append(fence).append("\n");
+    }
+
+    private static void row(StringBuilder out, Object... values) {
+        StringJoiner joiner = new StringJoiner(" | ", "| ", " |\n");
+        for (Object value : values) {
+            joiner.add(value == null ? "" : markdownEscape(String.valueOf(value)));
+        }
+        out.append(joiner);
+    }
+
+    private static boolean isScalar(Object value) {
+        return value == null || value instanceof String || value instanceof Number || value instanceof Boolean;
+    }
+
+    private static String inlineValue(Object value) {
+        if (value == null) {
+            return "";
+        }
+        if (isScalar(value)) {
+            return "`" + markdownEscape(String.valueOf(value)) + "`";
+        }
+        if (value instanceof List<?> list) {
+            if (list.isEmpty()) {
+                return "`[]`";
+            }
+            return markdownEscape(list.stream().limit(8).map(String::valueOf).toList().toString()) + (list.size() > 8 ? " ..." : "");
+        }
+        if (value instanceof Map<?, ?> map) {
+            return markdownEscape(map.toString());
+        }
+        return markdownEscape(String.valueOf(value));
+    }
+
+    private static String location(ReviewIssue issue) {
+        return nullToUnknown(issue.file) + ":" + (issue.line == null ? "?" : issue.line);
+    }
+
+    private static int severityRank(ReviewIssue issue) {
+        if (issue == null || issue.severity == null) {
+            return 99;
+        }
+        return switch (issue.severity) {
+            case critical -> 0;
+            case high -> 1;
+            case medium -> 2;
+            case low -> 3;
+            case info -> 4;
+        };
+    }
+
+    private static String languageForPath(String path) {
+        String lower = path == null ? "" : path.toLowerCase();
+        if (lower.endsWith(".java")) return "java";
+        if (lower.endsWith(".go")) return "go";
+        if (lower.endsWith(".py")) return "python";
+        if (lower.endsWith(".js")) return "javascript";
+        if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "typescript";
+        if (lower.endsWith(".rs")) return "rust";
+        if (lower.endsWith(".json")) return "json";
+        if (lower.endsWith(".xml")) return "xml";
+        if (lower.endsWith(".yml") || lower.endsWith(".yaml")) return "yaml";
+        if (lower.endsWith(".sh")) return "bash";
+        if (lower.endsWith(".md")) return "markdown";
+        return "text";
+    }
+
+    private static String firstSentence(String value, int maxChars) {
+        if (value.length() <= maxChars) {
+            return value;
+        }
+        return value.substring(0, Math.max(0, maxChars - 3)).stripTrailing() + "...";
+    }
+
+    private static String redact(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value
+                .replaceAll("(?i)(api[_-]?key\\s*[:=]\\s*)[A-Za-z0-9._:/+\\-=]{12,}", "$1[REDACTED]")
+                .replaceAll("(?i)(token\\s*[:=]\\s*)[A-Za-z0-9._:/+\\-=]{12,}", "$1[REDACTED]")
+                .replaceAll("tp-[A-Za-z0-9]{12,}", "tp-[REDACTED]")
+                .replaceAll("gh[pousr]_[A-Za-z0-9_]{20,}", "gh_[REDACTED]");
+    }
+
+    private static String markdownEscape(String value) {
+        return value == null ? "" : value.replace("|", "\\|").replace("\n", "<br>");
     }
 
     private static String nullToUnknown(String value) {

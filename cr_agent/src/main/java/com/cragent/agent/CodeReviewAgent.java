@@ -1,6 +1,7 @@
 package com.cragent.agent;
 
 import com.cragent.config.Settings;
+import com.cragent.cli.GitEnvironment;
 import com.cragent.llm.LlmClient;
 import com.cragent.llm.OpenAiCompatibleClient;
 import com.cragent.memory.MemoryStore;
@@ -14,7 +15,9 @@ import com.cragent.model.ToolCall;
 import com.cragent.model.ToolResult;
 import com.cragent.skills.SkillLoader;
 import com.cragent.tools.GitHubTools;
+import com.cragent.tools.LspTools;
 import com.cragent.tools.MemoryTools;
+import com.cragent.tools.RepoAuditTools;
 import com.cragent.tools.TestGenerationTools;
 import com.cragent.tools.ToolRouter;
 import com.cragent.trace.TraceRecorder;
@@ -22,6 +25,7 @@ import com.cragent.util.Jsons;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -74,6 +78,16 @@ public class CodeReviewAgent {
             new TestGenerationTools().register(router);
         } catch (Exception e) {
             trace.record("warning", Map.of("warning", "Test generation tools were not registered", "error", safeMessage(e)));
+        }
+        try {
+            new RepoAuditTools(settings).register(router);
+        } catch (Exception e) {
+            trace.record("warning", Map.of("warning", "Repo audit tools were not registered", "error", safeMessage(e)));
+        }
+        try {
+            new LspTools(settings).register(router);
+        } catch (Exception e) {
+            trace.record("warning", Map.of("warning", "LSP tools were not registered", "error", safeMessage(e)));
         }
     }
 
@@ -134,6 +148,11 @@ public class CodeReviewAgent {
 
     public AgentRunResult reviewLocalGitCommits(String repo, String base, String head, List<Map<String, Object>> changedFiles,
                                                 String diff, List<Map<String, Object>> commits, String author) {
+        return reviewLocalGitCommits(repo, base, head, changedFiles, diff, commits, author, null);
+    }
+
+    public AgentRunResult reviewLocalGitCommits(String repo, String base, String head, List<Map<String, Object>> changedFiles,
+                                                String diff, List<Map<String, Object>> commits, String author, Path repoPath) {
         trace.record("session_start", Map.of("repo", repo, "base", base, "head", head, "target", "local_git_commit_range", "dry_run", settings.dryRun()));
         ReviewResult reviewResult;
         List<Map<String, Object>> actions = new ArrayList<>();
@@ -143,7 +162,7 @@ public class CodeReviewAgent {
             if (Boolean.TRUE.equals(triage.get("human_required")) || !Boolean.TRUE.equals(triage.get("should_review"))) {
                 reviewResult = skippedResult(triage);
             } else {
-                Map<String, Object> analysis = analyzeProvidedCommits(repo, triage, diff, commits);
+                Map<String, Object> analysis = analyzeProvidedCommits(repo, triage, diff, commits, repoPath);
                 reviewResult = reviewPhase(repo, "local-git:" + base + "..." + head, triage, analysis);
                 for (ReviewIssue issue : reviewResult.issues) {
                     trace.record("issue_found", Map.of("issue", issue));
@@ -158,6 +177,85 @@ public class CodeReviewAgent {
             trace.record("error", Map.of("error", message, "exception", e.getClass().getName(), "stack_trace", stackTrace(e)));
         }
         return finishRun(repo, 0, status, reviewResult, actions, Map.of("target", "local_git_commit_range", "base", base, "head", head));
+    }
+
+    public AgentRunResult reviewRepository(String repo) {
+        trace.record("session_start", Map.of("repo", repo, "target", "repo_audit", "dry_run", settings.dryRun()));
+        ReviewResult reviewResult;
+        List<Map<String, Object>> actions = new ArrayList<>();
+        String status = "completed";
+        Map<String, Object> auditContext = new LinkedHashMap<>();
+        try (GitEnvironment.RepositoryLease lease = acquireRepo(repo)) {
+            trace.record("phase_start", Map.of("phase", Phase.REPO_INDEX.name()));
+            RepoAuditIndexer indexer = new RepoAuditIndexer(settings);
+            RepoAuditIndexer.AuditIndex index = indexer.index(lease.repoPath());
+            List<Map<String, Object>> manifest = index.files().stream().map(RepoAuditIndexer.AuditFile::manifest).toList();
+            List<Map<String, Object>> coverage = initialCoverage(index);
+            trace.record("repo_index", Map.of(
+                    "repo_path", lease.repoPath().toString(),
+                    "temporary_clone", lease.temporaryClone(),
+                    "files", manifest.size(),
+                    "slices", index.slices().size(),
+                    "skipped", index.skipped()
+            ));
+            trace.record("phase_end", Map.of("phase", Phase.REPO_INDEX.name(), "files", manifest.size(), "slices", index.slices().size()));
+
+            trace.record("phase_start", Map.of("phase", Phase.RISK_MODEL.name()));
+            Map<String, Object> lspContext = repoLspContext(lease.repoPath(), index);
+            Map<String, Object> sharedAnalysis = repoAuditSharedAnalysis(repo, index, manifest, List.of(), lspContext);
+            Map<String, Object> risk = repoAuditRiskModel(index, lspContext);
+            risk.put("diff_node_risk_model", sharedAnalysis.getOrDefault("risk_model", Map.of()));
+            risk.put("regression_test_reasoning", sharedAnalysis.getOrDefault("regression_test_reasoning", Map.of()));
+            risk.put("context_expansion", sharedAnalysis.getOrDefault("context_expansion", Map.of()));
+            trace.record("phase_end", Map.of("phase", Phase.RISK_MODEL.name(), "result", risk));
+
+            trace.record("phase_start", Map.of("phase", Phase.STATIC_CHECKS.name()));
+            List<Map<String, Object>> checks = settings.repoAuditRunChecks() ? new RepoStaticChecks().run(lease.repoPath(), index.stack()) : List.of();
+            trace.record("static_check", Map.of("checks", checks));
+            trace.record("phase_end", Map.of("phase", Phase.STATIC_CHECKS.name(), "checks", checks));
+            sharedAnalysis.put("static_checks", checks);
+
+            List<ReviewIssue> issues = progressiveRepoReview(repo, index, manifest, coverage, checks, risk, lspContext, sharedAnalysis);
+            reviewResult = new ReviewResult();
+            reviewResult.issues = repoEvidenceValidation(issues, index, checks, lspContext, sharedAnalysis);
+            reviewResult.summary = "Full repository audit completed with " + reviewResult.issues.size() + " validated issue(s).";
+            reviewResult.shouldComment = false;
+            reviewResult.shouldCreateFixPr = false;
+            reviewResult.shouldUpdateMemory = true;
+            trace.record("repo_audit_result", Map.of("summary", reviewResult.summary, "issues", reviewResult.issues));
+
+            auditContext.put("target", "repo_audit");
+            auditContext.put("coverage_summary", coverageSummary(index, coverage));
+            auditContext.put("risk_model", risk);
+            auditContext.put("static_checks", checks);
+            auditContext.put("lsp_context", lspContext);
+            auditContext.put("shared_analysis", sharedAnalysis);
+            auditContext.put("repo_path", lease.repoPath().toString());
+            if (reviewResult.shouldUpdateMemory) {
+                ToolResult patterns = call("memory_aggregate_patterns", Map.of("repo", repo, "issues", issueMaps(reviewResult.issues)));
+                actions.add(Map.of("name", "memory_aggregate_patterns", "result", patterns));
+            }
+        } catch (Exception e) {
+            status = "failed";
+            reviewResult = new ReviewResult();
+            String message = safeMessage(e);
+            reviewResult.summary = "Repository audit failed: " + message;
+            trace.record("error", Map.of("error", message, "exception", e.getClass().getName(), "stack_trace", stackTrace(e)));
+        }
+        if (auditContext.isEmpty()) {
+            auditContext.put("target", "repo_audit");
+        }
+        return finishRun(repo, 0, status, reviewResult, actions, auditContext);
+    }
+
+    private GitEnvironment.RepositoryLease acquireRepo(String repo) {
+        trace.record("phase_start", Map.of("phase", Phase.REPO_ACQUIRE.name(), "repo", repo));
+        GitEnvironment.RepositoryLease lease = GitEnvironment.acquireRepository(repo);
+        if (lease == null) {
+            throw new IllegalStateException("Unable to acquire repository via local clone or temporary clone: " + repo);
+        }
+        trace.record("phase_end", Map.of("phase", Phase.REPO_ACQUIRE.name(), "repo_path", lease.repoPath().toString(), "temporary_clone", lease.temporaryClone()));
+        return lease;
     }
 
     private AgentRunResult finishRun(String repo, int pr, String status, ReviewResult reviewResult,
@@ -236,6 +334,11 @@ public class CodeReviewAgent {
         result.put("sensitive_paths", contextExpansion.get("sensitive_paths"));
         result.put("related_tests", contextExpansion.get("related_tests"));
         result.put("security_file_contents", contextExpansion.get("security_file_contents"));
+        Map<String, Object> repoContext = diffRepoContext(repo, triage, null);
+        result.put("repo_context", repoContext);
+        result.put("repo_manifest", repoContext.getOrDefault("changed_manifest", List.of()));
+        result.put("lsp_context", repoContext.getOrDefault("lsp_context", Map.of()));
+        result.put("static_checks", repoContext.getOrDefault("static_checks", List.of()));
         result.put("risk_model", riskModel(triage, result));
         result.put("regression_test_reasoning", regressionTestReasoning(triage, result));
         result.put("memory", call("memory_get_all", Map.of("repo", repo, "author", triage.get("author"))).result);
@@ -296,6 +399,11 @@ public class CodeReviewAgent {
         result.put("sensitive_paths", contextExpansion.get("sensitive_paths"));
         result.put("related_tests", contextExpansion.get("related_tests"));
         result.put("security_file_contents", contextExpansion.get("security_file_contents"));
+        Map<String, Object> repoContext = diffRepoContext(repo, triage, null);
+        result.put("repo_context", repoContext);
+        result.put("repo_manifest", repoContext.getOrDefault("changed_manifest", List.of()));
+        result.put("lsp_context", repoContext.getOrDefault("lsp_context", Map.of()));
+        result.put("static_checks", repoContext.getOrDefault("static_checks", List.of()));
         result.put("risk_model", riskModel(triage, result));
         result.put("regression_test_reasoning", regressionTestReasoning(triage, result));
         result.put("memory", call("memory_get_all", Map.of("repo", repo, "author", triage.get("author"))).result);
@@ -335,6 +443,10 @@ public class CodeReviewAgent {
     }
 
     private Map<String, Object> analyzeProvidedCommits(String repo, Map<String, Object> triage, String diff, List<Map<String, Object>> commits) {
+        return analyzeProvidedCommits(repo, triage, diff, commits, null);
+    }
+
+    private Map<String, Object> analyzeProvidedCommits(String repo, Map<String, Object> triage, String diff, List<Map<String, Object>> commits, Path repoPath) {
         trace.record("phase_start", Map.of("phase", Phase.ANALYZE.name()));
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("diff", diff == null ? "" : diff);
@@ -347,6 +459,11 @@ public class CodeReviewAgent {
         result.put("sensitive_paths", List.of());
         result.put("related_tests", List.of());
         result.put("security_file_contents", List.of());
+        Map<String, Object> repoContext = diffRepoContext(repo, triage, repoPath);
+        result.put("repo_context", repoContext);
+        result.put("repo_manifest", repoContext.getOrDefault("changed_manifest", List.of()));
+        result.put("lsp_context", repoContext.getOrDefault("lsp_context", Map.of()));
+        result.put("static_checks", repoContext.getOrDefault("static_checks", List.of()));
         result.put("risk_model", riskModel(triage, result));
         result.put("regression_test_reasoning", regressionTestReasoning(triage, result));
         result.put("memory", call("memory_get_all", Map.of("repo", repo, "author", triage.get("author"))).result);
@@ -360,6 +477,7 @@ public class CodeReviewAgent {
 
     private ReviewResult reviewPhase(String repo, String target, Map<String, Object> triage, Map<String, Object> analysis) {
         trace.record("phase_start", Map.of("phase", Phase.REVIEW.name()));
+        Map<String, Object> reviewStrategy = sharedReviewStrategy(analysis);
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(new ChatMessage("system", SkillLoader.defaultPrompt()));
         messages.add(new ChatMessage("user", Jsons.stringify(Map.of(
@@ -367,17 +485,12 @@ public class CodeReviewAgent {
                 "target", target,
                 "triage", triage,
                 "analysis", analysis,
-                "review_strategy", Map.of(
-                        "context_expansion", analysis.getOrDefault("context_expansion", Map.of()),
-                        "risk_model", analysis.getOrDefault("risk_model", Map.of()),
-                        "regression_test_reasoning", analysis.getOrDefault("regression_test_reasoning", Map.of()),
-                        "evidence_validation", "Runtime validates changed-file membership, changed-line eligibility, duplicate findings, evidence, confidence, and severity calibration after model output."
-                ),
+                "review_strategy", reviewStrategy,
                 "instruction", """
                         Return exactly one valid JSON object. Do not return Markdown, code fences, tables, or explanation outside JSON.
                         Every string value must be valid JSON-escaped text. If a suggestion contains double quotes, write them as \\\".
                         Do not include raw template strings or raw code snippets that would break JSON string syntax.
-                        Use risk_model to focus review, use regression_test_reasoning for test-gap findings, and include evidence/impact for every issue.
+                        Use risk_model to focus review, use lsp_context for symbol diagnostics/definitions/references when available, use regression_test_reasoning for test-gap findings, and include evidence/impact for every issue.
                         Schema: {"summary":"...","issues":[{"severity":"critical|high|medium|low|info","category":"security|bug|style|performance|maintainability|tests","file":"path","line":1,"body":"problem","evidence":"exact diff/config/check evidence","impact":"why this matters in production","suggestion":"fix","autoFixable":false,"fixCode":null,"confidence":0.9}],"shouldComment":true,"shouldCreateFixPr":false,"shouldUpdateMemory":true}
                         """
         )) + "\n\nSTRICT OUTPUT RULE: valid JSON object only. JSON strings must escape inner double quotes as \\\"."));
@@ -405,6 +518,10 @@ public class CodeReviewAgent {
         ReviewResult result = evidenceValidation(ReviewResultParser.parse(finalMessage.content), triage, analysis);
         trace.record("phase_end", Map.of("phase", Phase.REVIEW.name(), "result", result));
         return result;
+    }
+
+    private static Map<String, Object> sharedReviewStrategy(Map<String, Object> analysis) {
+        return ReviewAnalysisNodes.sharedReviewStrategy(analysis);
     }
 
     private List<Map<String, Object>> act(String repo, int pr, Map<String, Object> triage, Map<String, Object> analysis, ReviewResult reviewResult) {
@@ -458,6 +575,175 @@ public class CodeReviewAgent {
         }
         trace.record("phase_end", Map.of("phase", Phase.ACT.name(), "actions", actions));
         return actions;
+    }
+
+    private List<ReviewIssue> progressiveRepoReview(String repo, RepoAuditIndexer.AuditIndex index, List<Map<String, Object>> manifest,
+                                                    List<Map<String, Object>> coverage, List<Map<String, Object>> checks,
+                                                    Map<String, Object> risk, Map<String, Object> lspContext,
+                                                    Map<String, Object> sharedAnalysis) {
+        trace.record("phase_start", Map.of("phase", Phase.PROGRESSIVE_REVIEW.name()));
+        List<ReviewIssue> issues = new ArrayList<>();
+        List<List<RepoAuditIndexer.AuditSlice>> batches = new RepoAuditIndexer(settings).batches(index.slices());
+        int batchNo = 0;
+        for (List<RepoAuditIndexer.AuditSlice> batch : batches) {
+            batchNo++;
+            trace.record("review_batch_start", Map.of("batch", batchNo, "slices", batch.stream().map(RepoAuditIndexer.AuditSlice::payload).toList()));
+            try {
+                ReviewResult result = reviewRepoBatch(repo, batchNo, batches.size(), manifest, batch, checks, risk,
+                        batchLspContext(lspContext, batch), coverageSummary(index, coverage), sharedAnalysis);
+                issues.addAll(result.issues);
+                markReviewed(coverage, batch);
+                trace.record("review_batch_end", Map.of("batch", batchNo, "issues", result.issues.size(), "coverage", coverageSummary(index, coverage)));
+            } catch (Exception e) {
+                markFailed(coverage, batch, safeMessage(e));
+                trace.record("review_batch_end", Map.of("batch", batchNo, "error", safeMessage(e), "coverage", coverageSummary(index, coverage)));
+            }
+        }
+        trace.record("coverage_summary", coverageSummary(index, coverage));
+        trace.record("phase_end", Map.of("phase", Phase.PROGRESSIVE_REVIEW.name(), "issues", issues.size(), "coverage", coverageSummary(index, coverage)));
+        return issues;
+    }
+
+    private ReviewResult reviewRepoBatch(String repo, int batchNo, int totalBatches, List<Map<String, Object>> manifest,
+                                         List<RepoAuditIndexer.AuditSlice> batch, List<Map<String, Object>> checks,
+                                         Map<String, Object> risk, Map<String, Object> lspContext, Map<String, Object> coverageSummary,
+                                         Map<String, Object> sharedAnalysis) {
+        Map<String, Object> reviewStrategy = sharedReviewStrategy(sharedAnalysis);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("repo", repo);
+        payload.put("batch", batchNo);
+        payload.put("total_batches", totalBatches);
+        payload.put("manifest_summary", manifest);
+        payload.put("coverage_summary", coverageSummary);
+        payload.put("risk_model", risk);
+        payload.put("static_checks", checks);
+        payload.put("lsp_context", lspContext);
+        payload.put("shared_analysis", sharedAnalysis);
+        payload.put("review_strategy", reviewStrategy);
+        payload.put("slices", batch.stream().map(RepoAuditIndexer.AuditSlice::payload).toList());
+        payload.put("instruction", "Review this batch as part of full repository audit. Use the shared review strategy nodes exactly like diff CR: context expansion, risk model, regression/test reasoning, and evidence validation expectations. Return valid JSON only.");
+        List<ChatMessage> messages = List.of(
+                new ChatMessage("system", new SkillLoader().loadSkill("code-review-repo-audit", false)),
+                new ChatMessage("user", Jsons.stringify(payload))
+        );
+        trace.record("llm_request", Map.of("phase", Phase.PROGRESSIVE_REVIEW.name(), "iteration", batchNo, "messages", messages));
+        Map<String, Object> response = llm.chatJson(messages, List.of(), 0.1);
+        trace.record("llm_response", Map.of("phase", Phase.PROGRESSIVE_REVIEW.name(), "iteration", batchNo, "response", response));
+        return ReviewResultParser.parse(OpenAiCompatibleClient.assistantMessage(response).content);
+    }
+
+    private static List<Map<String, Object>> initialCoverage(RepoAuditIndexer.AuditIndex index) {
+        List<Map<String, Object>> coverage = new ArrayList<>();
+        for (RepoAuditIndexer.AuditSlice slice : index.slices()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("path", slice.path());
+            item.put("start_line", slice.startLine());
+            item.put("end_line", slice.endLine());
+            item.put("status", "pending");
+            coverage.add(item);
+        }
+        for (Map<String, Object> skipped : index.skipped()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("path", skipped.get("path"));
+            item.put("status", "skipped");
+            item.put("reason", skipped.get("reason"));
+            coverage.add(item);
+        }
+        return coverage;
+    }
+
+    private static void markReviewed(List<Map<String, Object>> coverage, List<RepoAuditIndexer.AuditSlice> batch) {
+        mark(coverage, batch, "reviewed", null);
+    }
+
+    private static void markFailed(List<Map<String, Object>> coverage, List<RepoAuditIndexer.AuditSlice> batch, String reason) {
+        mark(coverage, batch, "failed", reason);
+    }
+
+    private static void mark(List<Map<String, Object>> coverage, List<RepoAuditIndexer.AuditSlice> batch, String status, String reason) {
+        for (RepoAuditIndexer.AuditSlice slice : batch) {
+            for (Map<String, Object> item : coverage) {
+                if (Objects.equals(item.get("path"), slice.path())
+                        && Objects.equals(item.get("start_line"), slice.startLine())
+                        && Objects.equals(item.get("end_line"), slice.endLine())) {
+                    item.put("status", status);
+                    if (reason != null) {
+                        item.put("reason", reason);
+                    }
+                }
+            }
+        }
+    }
+
+    private static Map<String, Object> coverageSummary(RepoAuditIndexer.AuditIndex index, List<Map<String, Object>> coverage) {
+        Map<String, Long> counts = coverage.stream()
+                .collect(Collectors.groupingBy(item -> String.valueOf(item.get("status")), LinkedHashMap::new, Collectors.counting()));
+        Map<String, Long> skipReasons = coverage.stream()
+                .filter(item -> "skipped".equals(item.get("status")))
+                .collect(Collectors.groupingBy(item -> String.valueOf(item.getOrDefault("reason", "unknown")), LinkedHashMap::new, Collectors.counting()));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("files_total", index.files().size() + index.skipped().size());
+        out.put("reviewable_files", index.files().size());
+        out.put("slices_total", index.slices().size());
+        out.put("status_counts", counts);
+        out.put("skip_reasons", skipReasons);
+        return out;
+    }
+
+    private Map<String, Object> repoLspContext(Path repoPath, RepoAuditIndexer.AuditIndex index) {
+        trace.record("phase_start", Map.of("phase", Phase.LSP_CONTEXT.name()));
+        Map<String, Object> context;
+        try {
+            context = new LspAnalyzer(settings).workspaceContext(repoPath, index);
+        } catch (Exception e) {
+            context = new LinkedHashMap<>();
+            context.put("enabled", settings.lspEnabled());
+            context.put("status", "failed");
+            context.put("error", safeMessage(e));
+        }
+        trace.record("phase_end", Map.of("phase", Phase.LSP_CONTEXT.name(), "result", context));
+        return context;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> batchLspContext(Map<String, Object> lspContext, List<RepoAuditIndexer.AuditSlice> batch) {
+        Set<String> paths = batch.stream().map(RepoAuditIndexer.AuditSlice::path).collect(Collectors.toCollection(HashSet::new));
+        Object preview = lspContext.get("symbols_preview");
+        List<Map<String, Object>> symbols = preview instanceof List<?> list
+                ? list.stream()
+                .filter(Map.class::isInstance)
+                .map(item -> (Map<String, Object>) item)
+                .filter(item -> paths.contains(String.valueOf(item.get("path"))))
+                .toList()
+                : List.of();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("status", lspContext.getOrDefault("status", "unknown"));
+        out.put("servers", lspContext.getOrDefault("servers", List.of()));
+        out.put("symbols", symbols);
+        out.put("diagnostics", lspContext.getOrDefault("diagnostics", Map.of()));
+        out.put("errors", lspContext.getOrDefault("errors", List.of()));
+        return out;
+    }
+
+    private static Map<String, Object> repoAuditRiskModel(RepoAuditIndexer.AuditIndex index, Map<String, Object> lspContext) {
+        List<String> sensitive = index.files().stream().filter(RepoAuditIndexer.AuditFile::sensitive).map(RepoAuditIndexer.AuditFile::path).toList();
+        List<String> configs = index.files().stream().filter(RepoAuditIndexer.AuditFile::config).map(RepoAuditIndexer.AuditFile::path).toList();
+        Map<String, Object> risk = new LinkedHashMap<>();
+        risk.put("stack", index.stack());
+        risk.put("directories", index.directories());
+        risk.put("sensitive_files", sensitive);
+        risk.put("config_files", configs);
+        risk.put("lsp_status", lspContext.getOrDefault("status", "unknown"));
+        risk.put("lsp_symbol_count", lspContext.getOrDefault("symbol_count", 0));
+        risk.put("lsp_errors", lspContext.getOrDefault("errors", List.of()));
+        risk.put("risk_level", sensitive.isEmpty() ? "medium" : "high");
+        return risk;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<ReviewIssue> repoEvidenceValidation(List<ReviewIssue> input, RepoAuditIndexer.AuditIndex index, List<Map<String, Object>> checks,
+                                                     Map<String, Object> lspContext, Map<String, Object> analysis) {
+        return EvidenceValidationNode.validateRepo(input, index, checks, lspContext, analysis, trace);
     }
 
     private Path reportPhase(AgentRunResult result, Map<String, Object> target) {
@@ -621,51 +907,7 @@ public class CodeReviewAgent {
     }
 
     private ReviewResult evidenceValidation(ReviewResult input, Map<String, Object> triage, Map<String, Object> analysis) {
-        trace.record("strategy_start", Map.of("strategy", "Evidence Validation"));
-        Map<String, Set<Integer>> changedLines = changedLinesByFile(triage.get("changed_files"));
-        Set<String> changedFiles = changedLines.keySet();
-        List<ReviewIssue> clean = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        int originalCount = input.issues.size();
-        for (ReviewIssue issue : input.issues) {
-            if (issue == null || issue.file == null || issue.file.isBlank() || issue.body == null || issue.body.isBlank()) {
-                continue;
-            }
-            if (!changedFiles.isEmpty() && !changedFiles.contains(issue.file)) {
-                trace.record("issue_filtered", Map.of("reason", "file_not_changed", "file", issue.file, "body", issue.body));
-                continue;
-            }
-            if (issue.confidence < 0.45) {
-                trace.record("issue_filtered", Map.of("reason", "low_confidence", "file", issue.file, "confidence", issue.confidence));
-                continue;
-            }
-            if (matchesFalsePositive(issue, analysis)) {
-                trace.record("issue_filtered", Map.of("reason", "false_positive_memory", "file", issue.file, "body", issue.body));
-                continue;
-            }
-            if (issue.line != null && !changedLineValid(changedLines.get(issue.file), issue.line)) {
-                trace.record("issue_line_cleared", Map.of("reason", "line_not_in_diff", "file", issue.file, "line", issue.line));
-                issue.line = null;
-            }
-            issue.category = normalizeCategory(issue.category);
-            issue.severity = calibratedSeverity(issue, analysis);
-            if (issue.evidence == null || issue.evidence.isBlank()) {
-                issue.evidence = inferEvidence(issue, triage);
-            }
-            String key = (issue.file + "|" + issue.line + "|" + issue.category + "|" + issue.body).toLowerCase();
-            if (seen.add(key)) {
-                clean.add(issue);
-            }
-        }
-        input.issues = clean;
-        input.shouldComment = input.shouldComment && !clean.isEmpty();
-        trace.record("strategy_end", Map.of(
-                "strategy", "Evidence Validation",
-                "input_issues", originalCount,
-                "output_issues", clean.size(),
-                "should_comment", input.shouldComment
-        ));
-        return input;
+        return EvidenceValidationNode.validateDiff(input, triage, analysis, trace);
     }
 
     private static String commentBody(ReviewIssue issue) {
@@ -702,104 +944,6 @@ public class CodeReviewAgent {
             out.add("no actionable review issues found");
         }
         return out;
-    }
-
-    @SuppressWarnings("unchecked")
-    private static boolean matchesFalsePositive(ReviewIssue issue, Map<String, Object> analysis) {
-        Object memory = analysis.get("memory");
-        if (!(memory instanceof Map<?, ?> memoryMap)) {
-            return false;
-        }
-        Object rules = memoryMap.get("rules");
-        if (!(rules instanceof List<?> list)) {
-            return false;
-        }
-        for (Object item : list) {
-            if (!(item instanceof Map<?, ?> raw)) {
-                continue;
-            }
-            Map<String, Object> rule = (Map<String, Object>) raw;
-            if (!"false_positive".equals(String.valueOf(rule.get("type")))) {
-                continue;
-            }
-            Map<String, Object> content = content(rule);
-            List<String> filePatterns = stringList(content.getOrDefault("file_patterns", List.of()));
-            if (filePatterns.stream().anyMatch(pattern -> globMatches(pattern, issue.file))) {
-                String text = (issue.body + "\n" + issue.evidence + "\n" + issue.category).toLowerCase();
-                String pattern = String.valueOf(content.getOrDefault("pattern", "")).toLowerCase();
-                if (pattern.isBlank() || text.contains(firstToken(pattern)) || issue.file.toLowerCase().contains("test") || issue.file.toLowerCase().contains("migration")) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Map<String, Object> content(Map<String, Object> record) {
-        Object content = record.get("content");
-        return content instanceof Map<?, ?> map ? (Map<String, Object>) map : record;
-    }
-
-    private static List<String> stringList(Object value) {
-        if (value instanceof List<?> list) {
-            return list.stream().map(String::valueOf).toList();
-        }
-        return List.of();
-    }
-
-    private static boolean globMatches(String glob, String path) {
-        String regex = glob.replace(".", "\\.").replace("**", ".*").replace("*", ".*");
-        return path.matches(regex) || path.contains(glob.replace("*", "").replace("/", ""));
-    }
-
-    private static String firstToken(String value) {
-        String[] parts = value.split("\\s+");
-        return parts.length == 0 ? value : parts[0];
-    }
-
-    private static String normalizeCategory(String category) {
-        String value = category == null ? "general" : category.toLowerCase();
-        return switch (value) {
-            case "security", "bug", "style", "performance", "maintainability", "tests", "general" -> value;
-            case "logic", "correctness" -> "bug";
-            case "test" -> "tests";
-            default -> "general";
-        };
-    }
-
-    private static Severity calibratedSeverity(ReviewIssue issue, Map<String, Object> analysis) {
-        String combined = (issue.category + "\n" + issue.body + "\n" + issue.evidence + "\n" + issue.impact).toLowerCase();
-        if (issue.confidence < 0.6 && (issue.severity == Severity.critical || issue.severity == Severity.high)) {
-            return Severity.medium;
-        }
-        if (containsAny(combined, "credential", "password", "secret", "token", "auth bypass", "authorization bypass", "sql injection", "xss", "path traversal", "ssrf")) {
-            return issue.confidence >= 0.8 ? Severity.high : Severity.medium;
-        }
-        if ("tests".equals(issue.category)) {
-            return issue.severity == Severity.critical || issue.severity == Severity.high ? Severity.medium : issue.severity;
-        }
-        if (issue.severity == Severity.critical && !containsAny(combined, "exploitable", "data loss", "outage", "secret leak", "auth bypass")) {
-            return Severity.high;
-        }
-        return issue.severity;
-    }
-
-    private static boolean changedLineValid(Set<Integer> validLines, Integer line) {
-        return line == null || (validLines != null && validLines.contains(line));
-    }
-
-    private static String inferEvidence(ReviewIssue issue, Map<String, Object> triage) {
-        for (Map<String, Object> file : listOfMaps(triage.get("changed_files"))) {
-            if (Objects.equals(issue.file, String.valueOf(file.get("filename")))) {
-                Object patch = file.get("patch");
-                if (patch != null) {
-                    String text = String.valueOf(patch).replaceAll("\\s+", " ").trim();
-                    return text.length() > 240 ? text.substring(0, 240) : text;
-                }
-            }
-        }
-        return null;
     }
 
     private static Map<String, Set<Integer>> changedLinesByFile(Object changedFiles) {
@@ -887,99 +1031,40 @@ public class CodeReviewAgent {
         return result;
     }
 
-    private Map<String, Object> riskModel(Map<String, Object> triage, Map<String, Object> analysis) {
-        trace.record("strategy_start", Map.of("strategy", "Risk Modeling"));
-        List<Map<String, Object>> files = listOfMaps(triage.get("changed_files"));
-        List<String> riskTypes = new ArrayList<>();
-        List<String> reviewFocus = new ArrayList<>();
-        boolean hasTests = false;
-        boolean hasBehavior = false;
-        for (Map<String, Object> file : files) {
-            String name = String.valueOf(file.get("filename"));
-            String lower = name.toLowerCase();
-            String patch = String.valueOf(file.getOrDefault("patch", "")).toLowerCase();
-            if (lower.contains("test") || lower.contains("spec")) {
-                hasTests = true;
-            }
-            if (!docsOrConfigOnly(name) && !lower.contains("test")) {
-                hasBehavior = true;
-            }
-            if (securityCoreFile(name) || containsAny(patch, "password", "token", "secret", "auth", "permission", "credential")) {
-                addUnique(riskTypes, "security/auth");
-                addUnique(reviewFocus, "trust boundaries, credential handling, auth/authz behavior");
-            }
-            if (containsAny(lower, "migration", "schema", "db/", "database") || containsAny(patch, "alter table", "create table", "drop table", "transaction")) {
-                addUnique(riskTypes, "data/migration");
-                addUnique(reviewFocus, "schema compatibility, transaction safety, rollback behavior");
-            }
-            if (containsAny(patch, "thread", "async", "await", "lock", "mutex", "synchronized", "goroutine", "channel", "executor")) {
-                addUnique(riskTypes, "concurrency/async");
-                addUnique(reviewFocus, "race conditions, cancellation, timeout, resource cleanup");
-            }
-            if (containsAny(lower, "api", "controller", "route", "handler", "graphql", "proto", "openapi") || containsAny(patch, "public ", "endpoint", "route", "request", "response")) {
-                addUnique(riskTypes, "api/contract");
-                addUnique(reviewFocus, "backward compatibility, validation, error semantics");
-            }
-            if (containsAny(lower, "package.json", "pom.xml", "build.gradle", "cargo.toml", "requirements.txt", "go.mod", "composer.json", "gemfile")) {
-                addUnique(riskTypes, "dependency/build");
-                addUnique(reviewFocus, "supply-chain risk, version compatibility, build/test behavior");
-            }
-        }
-        if (Boolean.TRUE.equals(triage.get("docs_only"))) {
-            addUnique(riskTypes, "docs-only");
-        } else if (!hasBehavior && hasTests) {
-            addUnique(riskTypes, "test-only");
-        } else if (hasBehavior && !hasTests) {
-            addUnique(riskTypes, "behavior-without-test-change");
-            addUnique(reviewFocus, "regression risk and missing test coverage");
-        }
-        if (riskTypes.isEmpty()) {
-            riskTypes.add("general-correctness");
-            reviewFocus.add("correctness, error handling, maintainability");
-        }
-        String level = Boolean.TRUE.equals(triage.get("high_risk")) || riskTypes.stream().anyMatch(r -> r.contains("security") || r.contains("data")) ? "high"
-                : (riskTypes.contains("behavior-without-test-change") || riskTypes.contains("api/contract") ? "medium" : "low");
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("risk_level", level);
-        result.put("risk_types", riskTypes);
-        result.put("review_focus", reviewFocus);
-        result.put("has_behavior_change", hasBehavior);
-        result.put("has_test_change", hasTests);
-        trace.record("strategy_end", Map.of("strategy", "Risk Modeling", "result", result));
+    private Map<String, Object> diffLspContext(String repo, Map<String, Object> triage, Path explicitRepoPath) {
+        trace.record("strategy_start", Map.of("strategy", "Diff LSP Context"));
+        Map<String, Object> result = new RepoContextNode(settings, trace).lspOnlyForDiff(repo, triage, explicitRepoPath);
+        trace.record("strategy_end", Map.of("strategy", "Diff LSP Context", "result", result));
         return result;
+    }
+
+    private Map<String, Object> diffRepoContext(String repo, Map<String, Object> triage, Path explicitRepoPath) {
+        return new RepoContextNode(settings, trace).forDiff(repo, triage, explicitRepoPath);
+    }
+
+    private Map<String, Object> repoAuditSharedAnalysis(String repo, RepoAuditIndexer.AuditIndex index, List<Map<String, Object>> manifest,
+                                                       List<Map<String, Object>> checks, Map<String, Object> lspContext) {
+        trace.record("strategy_start", Map.of("strategy", "Shared Analysis Nodes", "mode", "repo_audit"));
+        Map<String, Object> triage = ReviewAnalysisNodes.repoAuditSyntheticTriage(index);
+        Map<String, Object> analysis = new LinkedHashMap<>();
+        analysis.put("context_expansion", ReviewAnalysisNodes.repoAuditContextExpansion(index, manifest, lspContext));
+        analysis.put("repo_manifest", manifest);
+        analysis.put("lsp_context", lspContext);
+        analysis.put("static_checks", checks);
+        analysis.put("risk_model", ReviewAnalysisNodes.riskModel(triage, analysis, trace));
+        analysis.put("regression_test_reasoning", ReviewAnalysisNodes.regressionTestReasoning(triage, analysis, trace));
+        analysis.put("memory", call("memory_get_all", Map.of("repo", repo, "author", "repo_audit")).result);
+        trace.record("strategy_end", Map.of("strategy", "Shared Analysis Nodes", "result", analysis));
+        return analysis;
+    }
+
+    private Map<String, Object> riskModel(Map<String, Object> triage, Map<String, Object> analysis) {
+        return ReviewAnalysisNodes.riskModel(triage, analysis, trace);
     }
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> regressionTestReasoning(Map<String, Object> triage, Map<String, Object> analysis) {
-        trace.record("strategy_start", Map.of("strategy", "Regression/Test Reasoning"));
-        List<Map<String, Object>> changedFiles = listOfMaps(triage.get("changed_files"));
-        List<Map<String, Object>> related = (List<Map<String, Object>>) analysis.getOrDefault("related_tests", List.of());
-        Map<String, Object> riskModel = (Map<String, Object>) analysis.getOrDefault("risk_model", Map.of());
-        boolean hasBehavior = Boolean.TRUE.equals(riskModel.get("has_behavior_change"));
-        boolean hasTestChange = Boolean.TRUE.equals(riskModel.get("has_test_change"));
-        int relatedTestCount = related.stream()
-                .map(item -> item.get("tests"))
-                .filter(Map.class::isInstance)
-                .map(Map.class::cast)
-                .mapToInt(item -> intValue(item.get("count")))
-                .sum();
-        List<String> filesNeedingTests = changedFiles.stream()
-                .map(file -> String.valueOf(file.get("filename")))
-                .filter(name -> !docsOrConfigOnly(name) && !name.toLowerCase().contains("test"))
-                .limit(12)
-                .toList();
-        boolean likelyGap = hasBehavior && !hasTestChange && relatedTestCount == 0;
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("has_behavior_change", hasBehavior);
-        result.put("has_test_change", hasTestChange);
-        result.put("related_test_count", relatedTestCount);
-        result.put("likely_test_gap", likelyGap);
-        result.put("files_needing_test_consideration", filesNeedingTests);
-        result.put("guidance", likelyGap
-                ? "Only report a tests issue if the diff changes executable behavior and no related tests cover the changed path."
-                : "Avoid generic missing-test comments unless a concrete untested behavior or regression path is visible.");
-        trace.record("strategy_end", Map.of("strategy", "Regression/Test Reasoning", "result", result));
-        return result;
+        return ReviewAnalysisNodes.regressionTestReasoning(triage, analysis, trace);
     }
 
     private List<Map<String, Object>> securityFileContents(Map<String, Object> repoArgs, String headRef, Object changedFiles) {

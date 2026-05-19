@@ -5,5 +5,12 @@ public enum Phase {
     ANALYZE,
     REVIEW,
     ACT,
-    REPORT
+    REPORT,
+    REPO_ACQUIRE,
+    REPO_INDEX,
+    RISK_MODEL,
+    LSP_CONTEXT,
+    STATIC_CHECKS,
+    PROGRESSIVE_REVIEW,
+    EVIDENCE_VALIDATION
 }

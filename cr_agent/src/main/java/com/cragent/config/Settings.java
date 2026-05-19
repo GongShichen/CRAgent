@@ -19,7 +19,12 @@ public record Settings(
         Path reportDir,
         int maxIterations,
         int maxToolResultChars,
-        int humanReviewChangedLinesThreshold
+        int humanReviewChangedLinesThreshold,
+        int repoAuditBatchTokenBudget,
+        int repoAuditMaxFileChars,
+        boolean repoAuditRunChecks,
+        boolean lspEnabled,
+        int lspTimeoutSeconds
 ) {
     public static Settings load() {
         Map<String, String> env = new HashMap<>();
@@ -41,7 +46,8 @@ public record Settings(
 
     public Settings withDryRun(boolean value) {
         return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, githubToken, value, traceDir, memoryDir, reportDir,
-                maxIterations, maxToolResultChars, humanReviewChangedLinesThreshold);
+                maxIterations, maxToolResultChars, humanReviewChangedLinesThreshold,
+                repoAuditBatchTokenBudget, repoAuditMaxFileChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds);
     }
 
     private static Settings from(Map<String, String> env) {
@@ -56,7 +62,12 @@ public record Settings(
                 resolveRepoPath(env.getOrDefault("CR_AGENT_REPORT_DIR", "report")),
                 Integer.parseInt(env.getOrDefault("CR_AGENT_MAX_ITERATIONS", "30")),
                 Integer.parseInt(env.getOrDefault("CR_AGENT_MAX_TOOL_RESULT_CHARS", "12000")),
-                Integer.parseInt(env.getOrDefault("CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD", "2000"))
+                Integer.parseInt(env.getOrDefault("CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD", "2000")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_REPO_AUDIT_BATCH_TOKEN_BUDGET", "60000")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_REPO_AUDIT_MAX_FILE_CHARS", "20000")),
+                Boolean.parseBoolean(env.getOrDefault("CR_AGENT_REPO_AUDIT_RUN_CHECKS", "true")),
+                Boolean.parseBoolean(env.getOrDefault("CR_AGENT_LSP_ENABLED", "true")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_LSP_TIMEOUT_SECONDS", "30"))
         );
     }
 

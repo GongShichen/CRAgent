@@ -8,13 +8,15 @@ CR-Agent 是一个 Java 实现的 agentic code review 系统。它可以通过�
 
 ## 核心能力
 
-- 自然语言 chat 入口：可以直接输入 GitHub 仓库、PR 链接、`owner/repo`、compare URL、两个 commit 或分支名。
+- 自然语言 chat 入口：先由 LLM 识别用户是在请求全量仓库 CR、commit diff CR、PR CR 还是默认最新提交 CR。
 - PR review：读取 GitHub PR 元信息、diff、changed files、review comments、CI checks 和仓库上下文。
 - Commit range review：支持 `base...head`，也支持只给仓库时默认审查默认分支最新提交区间。
+- 全量仓库 CR：当用户明确说“整个仓库/全量/全部代码/repo audit”时触发，不做抽样，采用渐进式加载覆盖全部可审查文件。
+- LSP 增强：全量 CR 和 diff CR 都可启动真实 Language Server Protocol 服务，读取 document symbols、definitions、references、hover 和 diagnostics，用于跨文件影响分析与证据校验。
 - 本机 Git 优先：优先使用本机 clone；如果没有本地 clone，会临时 clone 到 `target-project/` 生成 diff 并在结束后清理；`GITHUB_TOKEN` 作为 GitHub API fallback。
 - 五阶段主流程：`Triage -> Analyze -> Review -> Act -> Report`。
 - 深度 review 策略：Context Expansion、Risk Modeling、Regression/Test Reasoning、Evidence Validation。
-- 工具系统：GitHub 读写工具、Memory 工具、测试生成工具、上下文扩展工具统一注册到 `ToolRouter`。
+- 工具系统：GitHub 读写工具、Memory 工具、测试生成工具、全仓库工具、LSP 工具统一注册到 `ToolRouter`。
 - 安全执行：默认 dry-run；真实写操作失败不会阻塞 review 主流程。
 - 轨迹记录：每次运行写入 JSONL trace，包含 phase、LLM 请求/响应、tool call/result、issue、action 和错误。
 - Memory 系统：记录 developer profile、repo pattern、false positive 规则和 health report。
@@ -66,20 +68,52 @@ CR-Agent/
 
 ## 执行流程
 
+CR-Agent 现在不是两套割裂流程，而是“共享 CR 节点库 + 不同调度入口”：
+
+- 共享节点：`RepoContext`、`LSPContext`、`StaticChecks`、`RiskModel`、`ContextExpansion`、`Regression/TestReasoning`、`ReviewStrategy`、`EvidenceValidation`、`Report`、`Memory`。
+- diff CR 调度：围绕 changed files / changed lines / patch hunks 运行共享节点。
+- 全量 CR 调度：用 `RepoIndex + CoverageLedger + ProgressiveReview` 做全仓库覆盖调度，但每个 batch 仍使用同一套 `RiskModel`、`Regression/TestReasoning`、`ReviewStrategy` 和 `EvidenceValidation` 语义。
+
+共享节点对应的主要实现类：
+
+- `RepoContextNode`：为 diff CR 生成本地 repo manifest、LSP context、static checks。
+- `ReviewAnalysisNodes`：统一实现 `RiskModel`、`Regression/TestReasoning`、`ReviewStrategy`，全量 CR 通过 repo-wide synthetic triage 复用这些节点。
+- `EvidenceValidationNode`：统一实现 diff CR 与全量 CR 的证据校验、去重、置信度校准和 false-positive memory 过滤。
+- `LspAnalyzer` / `JsonRpcLspClient` / `LspServerRegistry`：真实 LSP JSON-RPC、server 探测与缺失提示。
+
 1. `CrAgentCli` 接收命令或启动 `chat`。
-2. `ChatCommandParser` 从自然语言中识别 PR、仓库、commit range、compare URL 或 repo-only 请求。
-3. 如果是 repo-only，agent 会尝试读取默认分支最新提交区间。
+2. chat 模式先加载 `code-review-intent` skill，由 LLM 输出 `REPO_AUDIT|COMMITS|PR|REPO_LATEST|HELP|EXIT|UNKNOWN`；模型失败时 fallback 到规则 parser。
+3. 如果是 repo-only 且没有“全量/整个仓库”语义，agent 会尝试读取默认分支最新提交区间。
 4. `GitEnvironment` 优先使用本机 Git 环境和本地 clone 生成 review context。
 5. 如果本机没有 clone，agent 会临时 clone 到项目根的 `target-project/`，生成上下文后无论成功失败都会清理。
 6. 如果本机 Git/临时 clone 不可用，agent 使用 `GITHUB_TOKEN` 通过 GitHub API 获取 PR 或 commit context。
-7. `CodeReviewAgent` 执行主流程：
+7. diff CR 的 `Analyze` 会在 Context Expansion 后尝试加载本地仓库 LSP 上下文，把 changed files 的 symbols、diagnostics 和 server/install 状态传给 Review。
+8. `CodeReviewAgent` 执行主流程：
    - `Triage`：判断 docs-only、draft、大变更、风险文件、是否需要人工介入。
    - `Analyze`：收集 diff、文件列表、CI、comments、依赖配置、相关测试、敏感路径和 memory。
    - `Review`：调用 LLM 输出结构化 JSON issues。
    - `Act`：dry-run 或真实执行 review comments、auto-fix PR、memory update 等动作。
    - `Report`：加载 `code-review-report` skill，调用 LLM 生成 report draft，并写入 `report/`。
-8. `Evidence Validation` 在行动前过滤证据不足、行号不在 diff、重复或低置信度的问题。
-9. `TraceRecorder` 将完整运行轨迹写入 `cr_agent/data/traces/*.jsonl`。
+9. `Evidence Validation` 在行动前过滤证据不足、行号不在 diff、重复或低置信度的问题。
+10. `TraceRecorder` 将完整运行轨迹写入 `cr_agent/data/traces/*.jsonl`。
+
+全量仓库 CR 使用独立流程：
+
+```text
+RepoAcquire -> RepoIndex -> LSPContext -> RiskModel -> StaticChecks -> ProgressiveReview -> EvidenceValidation -> Report
+```
+
+其中 `ProgressiveReview` 会先索引全仓库，再按模块/文件/片段逐批加载。batch 顺序可以按风险排序，但所有未被 build/vendor/generated/binary/cache 规则排除的文件都会进入 coverage ledger，不做抽样。
+
+`LSPContext` 会按项目语言启动真实 LSP server，并通过 JSON-RPC 调用标准 LSP 方法。当前支持的 server：
+
+- Java：`jdtls`
+- JavaScript/TypeScript：`typescript-language-server --stdio`
+- Python：`pyright-langserver --stdio`
+- Go：`gopls`
+- Rust：`rust-analyzer`
+
+如果 `CR_AGENT_LSP_ENABLED=true` 且对应 server 未安装，agent 会在 chat 启动时提示缺失项和安装方法，但不会自动安装。任务执行中如果遇到对应语言的 server 缺失，会跳过该语言的 LSP 并继续后续 CR；agent 不会用正则结果伪装 LSP 输出。
 
 ## 配置
 
@@ -112,6 +146,11 @@ CR_AGENT_REPORT_DIR=report
 CR_AGENT_MAX_ITERATIONS=30
 CR_AGENT_MAX_TOOL_RESULT_CHARS=12000
 CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD=2000
+CR_AGENT_REPO_AUDIT_BATCH_TOKEN_BUDGET=60000
+CR_AGENT_REPO_AUDIT_MAX_FILE_CHARS=20000
+CR_AGENT_REPO_AUDIT_RUN_CHECKS=true
+CR_AGENT_LSP_ENABLED=true
+CR_AGENT_LSP_TIMEOUT_SECONDS=30
 ```
 
 配置说明：
@@ -127,6 +166,11 @@ CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD=2000
 - `CR_AGENT_MAX_ITERATIONS`：agent tool-use 最大轮数。
 - `CR_AGENT_MAX_TOOL_RESULT_CHARS`：单次工具返回最大字符数。
 - `CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD`：超过该 changed lines 阈值时建议人工 review。
+- `CR_AGENT_REPO_AUDIT_BATCH_TOKEN_BUDGET`：全量 CR 每批渐进式加载的预算，用于控制 batch 大小，不用于截断文件总数。
+- `CR_AGENT_REPO_AUDIT_MAX_FILE_CHARS`：单个文件片段最大字符数，超出会按连续行号切片。
+- `CR_AGENT_REPO_AUDIT_RUN_CHECKS`：全量 CR 是否运行只读静态检查。
+- `CR_AGENT_LSP_ENABLED`：是否启用真实 LSP JSON-RPC 上下文增强。
+- `CR_AGENT_LSP_TIMEOUT_SECONDS`：单次 LSP 请求超时时间。
 
 ## Java 环境要求
 
@@ -138,6 +182,7 @@ CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD=2000
 - macOS/Linux shell 环境，Windows 可使用 `gradlew.bat`。
 - 网络可访问配置的 `OPENAI_BASE_URL`。
 - 如果需要读取私有仓库或真实写 GitHub review，需要本机 Git 凭据或 `GITHUB_TOKEN`。
+- 如果启用 LSP，需要按仓库语言安装对应 language server，并确保命令在 `PATH` 中。
 
 推荐环境：
 
@@ -170,12 +215,21 @@ sdk install java 21.0.6-tem
 brew install openjdk@21
 ```
 
+chat 启动时会检查 LSP server。缺失时请按需自行安装：
+
+```bash
+npm install -g typescript typescript-language-server pyright
+go install golang.org/x/tools/gopls@latest
+rustup component add rust-analyzer
+brew install jdtls
+```
+
 在 IntelliJ IDEA 中打开：
 
 1. 打开 `CR-Agent/cr_agent/`。
 2. 选择 Gradle JVM 为 JDK 21+。
 3. 使用 Gradle task `run` 或 `test`。
-4. 运行参数示例：`chat` 或 `review --repo owner/name --pr 123`。
+4. 使用 Gradle task `run` 启动 chat。
 
 注意：建议从 `cr_agent/` 目录运行命令。此时 agent 会读取父目录 `../.env`，也会读取当前目录 `.env`；当前目录 `.env` 优先级最高。
 
@@ -191,13 +245,14 @@ cd cr_agent
 启动自然语言 chat：
 
 ```bash
-./gradlew run --args="chat"
+./gradlew run
 ```
 
 chat 示例输入：
 
 ```text
 帮我 review https://github.com/GongShichen/JTravelAgent.git
+对整个 https://github.com/GongShichen/JTravelAgent.git 做 CR
 review https://github.com/owner/name/pull/123
 review owner/name 从 main 到 feature-branch
 review https://github.com/owner/name/compare/main...feature-branch
@@ -206,57 +261,29 @@ live review owner/name 从 6e83187b 到 0224b0ec
 
 如果只给仓库，agent 会默认 review 默认分支最新提交区间。
 
-## 常用命令
+## 使用方式
 
-Review GitHub PR：
-
-```bash
-./gradlew run --args="review --repo owner/name --pr 123"
-./gradlew run --args="review --pr-url https://github.com/owner/name/pull/123"
-```
-
-Review commit range：
+当前 Java agent 只保留 chat 模式，不再通过命令行参数触发任务：
 
 ```bash
-./gradlew run --args="review-commits --repo owner/name --base main --head feature-branch"
-./gradlew run --args="review-commits --repo https://github.com/owner/name --base <base-sha> --head <head-sha>"
+./gradlew run
 ```
 
-检查本机 Git 环境：
+进入 chat 后用自然语言告诉 agent 要 review 的对象，例如 PR、两个 commit、仓库最新提交或全量仓库 CR。
 
-```bash
-./gradlew run --args="git-check --repo owner/name"
+LSP 工具也可以被 agent 调用：
+
+```text
+lsp_detect_servers
+lsp_workspace_symbols
+lsp_document_symbols
+lsp_definition
+lsp_references
+lsp_hover
+lsp_diagnostics
 ```
 
-检查 GitHub token 权限：
-
-```bash
-./gradlew run --args="github-token-check --repo owner/name"
-```
-
-批量 review：
-
-```bash
-./gradlew run --args="batch-review --prs prs.txt"
-```
-
-初始化 memory：
-
-```bash
-./gradlew run --args="init-memory"
-```
-
-查看仓库 memory health：
-
-```bash
-./gradlew run --args="health-report --repo owner/name"
-```
-
-Inspect trace：
-
-```bash
-./gradlew run --args="inspect --trace data/traces/<session>.jsonl"
-```
+Git、GitHub token、memory、trace 和 dataset 导出能力仍在代码中保留给内部流程使用；对用户入口只暴露 chat。
 
 ## Review 输出
 
@@ -284,6 +311,7 @@ Actions: 2
 
 ```text
 report/<session>-<owner-repo>.md
+report/<session>-<owner-repo>-repo-audit.md
 ```
 
 如果 Report 节点的 LLM 调用失败，agent 会写一份 deterministic fallback report；这不会影响主 review 的完成状态。
@@ -359,27 +387,6 @@ memory_update
 session_end
 ```
 
-导出 SFT：
-
-```bash
-cd cr_agent
-./gradlew run --args="export-sft --input data/traces --output ../datasets/SFT/sft.jsonl"
-```
-
-导出 DPO：
-
-```bash
-cd cr_agent
-./gradlew run --args="export-dpo --input data/traces --output ../datasets/DPO/dpo.jsonl"
-```
-
-一次性导出：
-
-```bash
-cd cr_agent
-./gradlew run --args="export-datasets --input data/traces"
-```
-
 输出目录：
 
 ```text
@@ -417,7 +424,7 @@ cd cr_agent
 
 ```bash
 cd cr_agent
-./gradlew run --args="chat"
+./gradlew run
 ```
 
 然后输入：

@@ -1,22 +1,16 @@
 package com.cragent.cli;
 
 import com.cragent.agent.CodeReviewAgent;
+import com.cragent.agent.LspAnalyzer;
+import com.cragent.agent.LspServerRegistry;
 import com.cragent.config.Settings;
-import com.cragent.datasets.TraceDatasetExporter;
 import com.cragent.llm.LlmClient;
 import com.cragent.llm.OpenAiCompatibleClient;
-import com.cragent.memory.MemoryStore;
 import com.cragent.model.AgentRunResult;
 import com.cragent.model.ReviewIssue;
 import com.cragent.model.ToolResult;
 import com.cragent.tools.GitHubTools;
-import com.cragent.tools.MemoryTools;
-import com.cragent.util.Jsons;
-import com.cragent.util.ProjectPaths;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Scanner;
 
@@ -30,93 +24,11 @@ public class CrAgentCli {
     }
 
     private static void run(String[] args) throws Exception {
-        if (args.length == 0) {
-            usage();
-            return;
+        if (args.length > 0) {
+            System.out.println("CR Agent 现在只保留 chat 模式；命令行参数会被忽略。直接使用 ./gradlew run 启动。");
         }
-        String command = args[0];
-        Map<String, String> opts = parse(args);
-        Settings settings = applyCliOverrides(Settings.load(), opts);
-        switch (command) {
-            case "review" -> {
-                PrIdentifier id = resolvePr(opts);
-                requireReviewCredentials(settings);
-                LlmClient llm = new OpenAiCompatibleClient(settings);
-                AgentRunResult result = new CodeReviewAgent(settings, llm).review(id.fullRepo(), id.pr());
-                printReview(result);
-            }
-            case "review-commits" -> {
-                String repo = normalizeRepo(required(opts, "--repo"));
-                String base = required(opts, "--base");
-                String head = required(opts, "--head");
-                requireLlmCredentials(settings);
-                LlmClient llm = new OpenAiCompatibleClient(settings);
-                AgentRunResult result = reviewCommitRange(settings, llm, repo, base, head);
-                printReview(result);
-            }
-            case "chat" -> chat(settings);
-            case "git-check" -> printGitCheck(normalizeRepo(required(opts, "--repo")));
-            case "github-token-check" -> printGitHubTokenCheck(settings, normalizeRepo(required(opts, "--repo")));
-            case "batch-review" -> {
-                Path prsFile = Path.of(required(opts, "--prs"));
-                requireReviewCredentials(settings);
-                LlmClient llm = new OpenAiCompatibleClient(settings);
-                int ok = 0;
-                for (String line : Files.readAllLines(prsFile)) {
-                    String trimmed = line.trim();
-                    if (trimmed.isEmpty() || trimmed.startsWith("#")) {
-                        continue;
-                    }
-                    PrIdentifier id = PrIdentifier.parse(trimmed);
-                    CodeReviewAgent agent = new CodeReviewAgent(settings, llm);
-                    AgentRunResult result = agent.review(id.fullRepo(), id.pr());
-                    if ("completed".equals(result.status)) {
-                        ok++;
-                    }
-                    System.out.printf("%s #%d: %s (%d issues)%n", id.fullRepo(), id.pr(), result.status, result.issues.size());
-                }
-                System.out.println("Successful reviews: " + ok);
-            }
-            case "health-report" -> {
-                String repo = required(opts, "--repo");
-                Object report = new MemoryTools(new MemoryStore(settings.memoryDir())).memoryHealthReport(Map.of("repo", repo));
-                System.out.println(Jsons.pretty(report));
-            }
-            case "export-sft" -> {
-                Path input = Path.of(opts.getOrDefault("--input", ProjectPaths.defaultTraceDir().toString()));
-                Path output = Path.of(opts.getOrDefault("--output", ProjectPaths.defaultSftPath().toString()));
-                int count = new TraceDatasetExporter().exportSft(input, output);
-                System.out.printf("Exported %d SFT records to %s%n", count, output);
-            }
-            case "export-dpo" -> {
-                Path input = Path.of(opts.getOrDefault("--input", ProjectPaths.defaultTraceDir().toString()));
-                Path output = Path.of(opts.getOrDefault("--output", ProjectPaths.defaultDpoPath().toString()));
-                int count = new TraceDatasetExporter().exportDpo(input, output);
-                System.out.printf("Exported %d DPO records to %s%n", count, output);
-            }
-            case "export-datasets" -> {
-                Path input = Path.of(opts.getOrDefault("--input", ProjectPaths.defaultTraceDir().toString()));
-                Path sft = Path.of(opts.getOrDefault("--sft-output", ProjectPaths.defaultSftPath().toString()));
-                Path dpo = Path.of(opts.getOrDefault("--dpo-output", ProjectPaths.defaultDpoPath().toString()));
-                TraceDatasetExporter exporter = new TraceDatasetExporter();
-                int sftCount = exporter.exportSft(input, sft);
-                int dpoCount = exporter.exportDpo(input, dpo);
-                System.out.printf("Exported %d SFT records to %s%n", sftCount, sft);
-                System.out.printf("Exported %d DPO records to %s%n", dpoCount, dpo);
-            }
-            case "inspect" -> {
-                Path trace = Path.of(required(opts, "--trace"));
-                inspectTrace(trace);
-            }
-            case "init-memory" -> {
-                Files.createDirectories(settings.memoryDir());
-                if (!Files.exists(settings.memoryDir().resolve("rules.jsonl"))) {
-                    Files.createFile(settings.memoryDir().resolve("rules.jsonl"));
-                }
-                System.out.println("Initialized memory files in " + settings.memoryDir());
-            }
-            default -> usage();
-        }
+        Settings settings = Settings.load();
+        chat(settings);
     }
 
     private static void printReview(AgentRunResult result) {
@@ -139,54 +51,9 @@ public class CrAgentCli {
         }
     }
 
-    private static Map<String, String> parse(String[] args) {
-        Map<String, String> out = new HashMap<>();
-        for (int i = 1; i < args.length; i++) {
-            if (!args[i].startsWith("--")) {
-                continue;
-            }
-            if (i + 1 < args.length && !args[i + 1].startsWith("--")) {
-                out.put(args[i], args[++i]);
-            } else {
-                out.put(args[i], "true");
-            }
-        }
-        return out;
-    }
-
-    private static Settings applyCliOverrides(Settings settings, Map<String, String> opts) {
-        if (opts.containsKey("--dry-run")) {
-            return settings.withDryRun(true);
-        }
-        if (opts.containsKey("--live")) {
-            return settings.withDryRun(false);
-        }
-        return settings;
-    }
-
-    private static PrIdentifier resolvePr(Map<String, String> opts) {
-        if (opts.containsKey("--pr-url")) {
-            return PrIdentifier.parse(opts.get("--pr-url"));
-        }
-        if (opts.containsKey("--repo") && opts.containsKey("--pr")) {
-            return PrIdentifier.parse(opts.get("--repo") + " #" + opts.get("--pr"));
-        }
-        if (opts.containsKey("--pr")) {
-            return PrIdentifier.parse(opts.get("--pr"));
-        }
-        throw new IllegalArgumentException("Provide --repo owner/name --pr 123 or --pr-url https://github.com/owner/name/pull/123");
-    }
-
-    private static String normalizeRepo(String repo) {
-        String value = ChatCommandParser.normalizeRepo(repo);
-        if (value == null) {
-            throw new IllegalArgumentException("Repository must be owner/name or a GitHub repository URL.");
-        }
-        return value;
-    }
-
     private static void chat(Settings baseSettings) {
         System.out.println("CR Agent chat 已启动。输入 GitHub PR 或 commit 范围，我会解析并执行 review。输入 help 查看示例，exit 退出。");
+        printLspPreflight(baseSettings);
         Scanner scanner = new Scanner(System.in);
         while (true) {
             System.out.print("cr-agent> ");
@@ -195,7 +62,7 @@ public class CrAgentCli {
                 return;
             }
             String line = scanner.nextLine().trim();
-            ChatCommandParser.ChatIntent intent = ChatCommandParser.parse(line);
+            ChatCommandParser.ChatIntent intent = routeChatIntent(baseSettings, line);
             try {
                 switch (intent.type()) {
                     case EXIT -> {
@@ -217,9 +84,16 @@ public class CrAgentCli {
                     case COMMITS -> {
                         Settings settings = applyChatOverride(baseSettings, intent);
                         requireLlmCredentials(settings);
-                        System.out.printf("解析到 commit range review: %s %s...%s (%s)%n", intent.repo(), intent.base(), intent.head(), settings.dryRun() ? "dry-run" : "live");
+                        System.out.printf("识别到 commit diff CR: %s %s...%s (%s)%n", intent.repo(), intent.base(), intent.head(), settings.dryRun() ? "dry-run" : "live");
                         LlmClient llm = new OpenAiCompatibleClient(settings);
                         printReview(reviewCommitRange(settings, llm, intent.repo(), intent.base(), intent.head()));
+                    }
+                    case REPO_AUDIT -> {
+                        Settings settings = applyChatOverride(baseSettings, intent);
+                        requireLlmCredentials(settings);
+                        System.out.printf("识别到全量仓库 CR: %s (%s)%n", intent.repo(), settings.dryRun() ? "dry-run" : "live");
+                        LlmClient llm = new OpenAiCompatibleClient(settings);
+                        printReview(new CodeReviewAgent(settings, llm).reviewRepository(intent.repo()));
                     }
                     case REPO -> {
                         Settings settings = applyChatOverride(baseSettings, intent);
@@ -236,8 +110,36 @@ public class CrAgentCli {
         }
     }
 
+    private static void printLspPreflight(Settings settings) {
+        if (!settings.lspEnabled()) {
+            System.out.println("LSP: disabled by CR_AGENT_LSP_ENABLED=false");
+            return;
+        }
+        System.out.println("LSP server preflight:");
+        boolean missing = false;
+        for (LspAnalyzer.ServerSpec server : LspAnalyzer.supportedServers()) {
+            boolean available = LspServerRegistry.commandExists(server.executable());
+            System.out.printf("- %s: %s (%s)%n", server.language(), available ? "available" : "missing", server.command());
+            if (!available) {
+                missing = true;
+                System.out.println("  install: " + server.installHint());
+            }
+        }
+        if (missing) {
+            System.out.println("缺失的 LSP server 不会自动安装；相关语言在本轮任务中会跳过 LSP，上下文仍会继续用 diff/static/repo index。");
+        }
+    }
+
     private static Settings applyChatOverride(Settings settings, ChatCommandParser.ChatIntent intent) {
         return intent.dryRunOverride() == null ? settings : settings.withDryRun(intent.dryRunOverride());
+    }
+
+    private static ChatCommandParser.ChatIntent routeChatIntent(Settings settings, String line) {
+        ChatCommandParser.ChatIntent local = ChatCommandParser.parse(line);
+        if (local.type() == ChatCommandParser.Type.EXIT || local.type() == ChatCommandParser.Type.HELP || !settings.hasLlmCredentials()) {
+            return local;
+        }
+        return new LlmIntentRouter(new OpenAiCompatibleClient(settings)).route(line);
     }
 
     private static AgentRunResult reviewCommitRange(Settings settings, LlmClient llm, String repo, String base, String head) {
@@ -248,7 +150,7 @@ public class CrAgentCli {
             } else {
                 System.out.println("使用本机 Git 仓库生成 review 上下文: " + local.repoPath());
             }
-            return new CodeReviewAgent(settings, llm).reviewLocalGitCommits(repo, base, head, local.changedFiles(), local.diff(), local.commits(), local.author());
+            return new CodeReviewAgent(settings, llm).reviewLocalGitCommits(repo, base, head, local.changedFiles(), local.diff(), local.commits(), local.author(), local.repoPath());
         }
         if (!settings.hasGithubCredentials()) {
             throw new IllegalStateException("本机未找到可用 clone，且 GITHUB_TOKEN 未配置，无法读取 " + repo + " 的 commit diff。");
@@ -288,6 +190,7 @@ public class CrAgentCli {
                 可以这样说：
                   帮我 review https://github.com/owner/repo/pull/123
                   帮我 review https://github.com/owner/repo
+                  对整个 https://github.com/owner/repo.git 做 CR
                   看一下 owner/repo PR 123
                   对 owner/repo 从 abc1234 到 def5678 两个 commit 做 CR
                   review https://github.com/owner/repo/compare/main...feature-branch
@@ -339,40 +242,6 @@ public class CrAgentCli {
         }
     }
 
-    private static void inspectTrace(Path trace) throws Exception {
-        int i = 0;
-        for (String line : Files.readAllLines(trace)) {
-            if (line.isBlank()) {
-                continue;
-            }
-            Map<?, ?> record = Jsons.MAPPER.readValue(line, Map.class);
-            Object typeValue = record.get("event_type");
-            if (typeValue == null) {
-                typeValue = record.get("type");
-            }
-            String type = String.valueOf(typeValue == null ? "?" : typeValue);
-            System.out.printf("[%03d] %s", i++, type);
-            if (record.containsKey("phase")) {
-                System.out.print(" phase=" + record.get("phase"));
-            }
-            if (record.containsKey("summary")) {
-                System.out.print(" summary=" + record.get("summary"));
-            }
-            if (record.containsKey("issues_found")) {
-                System.out.print(" issues=" + record.get("issues_found"));
-            }
-            System.out.println();
-        }
-    }
-
-    private static String required(Map<String, String> opts, String key) {
-        String value = opts.get(key);
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException("Missing required option: " + key);
-        }
-        return value;
-    }
-
     private static void requireReviewCredentials(Settings settings) {
         requireLlmCredentials(settings);
         if (!settings.hasGithubCredentials()) {
@@ -392,26 +261,13 @@ public class CrAgentCli {
                 : e.getMessage();
         System.out.println("Status: failed");
         System.out.println("Summary: " + message);
-        System.out.println("Hint: fix the configuration or command arguments, then rerun the same command. Use --dry-run to avoid GitHub writes.");
+        System.out.println("Hint: fix the configuration and rerun ./gradlew run.");
     }
 
     private static void usage() {
         System.out.println("""
                 Usage:
-                  ./gradlew run --args="review --repo owner/name --pr 123"
-                  ./gradlew run --args="review --pr-url https://github.com/owner/name/pull/123"
-                  ./gradlew run --args="chat"
-                  ./gradlew run --args="git-check --repo owner/name"
-                  ./gradlew run --args="github-token-check --repo owner/name"
-                  ./gradlew run --args="review-commits --repo owner/name --base <sha-or-ref> --head <sha-or-ref> --dry-run"
-                  ./gradlew run --args="review-commits --repo https://github.com/owner/name --base main --head feature-branch --dry-run"
-                  ./gradlew run --args="batch-review --prs prs.txt"
-                  ./gradlew run --args="health-report --repo owner/name"
-                  ./gradlew run --args="export-sft --input data/traces --output ../datasets/SFT/sft.jsonl"
-                  ./gradlew run --args="export-dpo --input data/traces --output ../datasets/DPO/dpo.jsonl"
-                  ./gradlew run --args="export-datasets --input data/traces"
-                  ./gradlew run --args="inspect --trace data/traces/<session>.jsonl"
-                  ./gradlew run --args="init-memory"
+                  ./gradlew run
                 """);
     }
 }

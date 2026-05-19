@@ -141,6 +141,10 @@ public final class ChatCommandParser {
             return new ChatIntent(Type.REPO, repo, null, null, null, dryRunOverride, null);
         }
 
+        public static ChatIntent repoAudit(String repo, Boolean dryRunOverride) {
+            return new ChatIntent(Type.REPO_AUDIT, repo, null, null, null, dryRunOverride, null);
+        }
+
         public static ChatIntent help() {
             return new ChatIntent(Type.HELP, null, null, null, null, null, null);
         }
@@ -153,6 +157,7 @@ public final class ChatCommandParser {
     public enum Type {
         PR,
         COMMITS,
+        REPO_AUDIT,
         REPO,
         HELP,
         EXIT,

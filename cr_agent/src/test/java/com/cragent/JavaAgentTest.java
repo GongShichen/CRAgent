@@ -1,13 +1,18 @@
 package com.cragent;
 
 import com.cragent.agent.CodeReviewAgent;
+import com.cragent.agent.ReportWriter;
+import com.cragent.agent.RepoAuditIndexer;
 import com.cragent.agent.ReviewResultParser;
 import com.cragent.config.Settings;
 import com.cragent.datasets.TraceDatasetExporter;
 import com.cragent.llm.FakeLlmClient;
 import com.cragent.llm.LlmClient;
 import com.cragent.model.AgentRunResult;
+import com.cragent.cli.LlmIntentRouter;
+import com.cragent.model.ReviewIssue;
 import com.cragent.model.ReviewResult;
+import com.cragent.model.Severity;
 import com.cragent.model.ToolCall;
 import com.cragent.model.ToolResult;
 import com.cragent.cli.ChatCommandParser;
@@ -198,8 +203,8 @@ class JavaAgentTest {
                 tmp.resolve("report"),
                 30,
                 12000,
-                2000
-        );
+                2000,
+                60000, 20000, true, true, 30);
         AgentRunResult result = testAgent(settings, new FakeLlmClient()).review("owner/repo", 1);
         assertEquals("completed", result.status);
         assertFalse(result.issues.isEmpty());
@@ -207,6 +212,50 @@ class JavaAgentTest {
         assertNotNull(result.reportPath);
         assertTrue(result.reportPath.toFile().exists());
         assertTrue(Files.readString(result.reportPath).contains("Code Review Report"));
+    }
+
+    @Test
+    void reportWriterFormatsContextAndEvidenceAsMarkdownBlocks() throws Exception {
+        AgentRunResult result = new AgentRunResult();
+        result.sessionId = "session-1";
+        result.repo = "owner/repo";
+        result.status = "completed";
+        result.summary = "done";
+        result.tracePath = tmp.resolve("trace.jsonl");
+
+        ReviewIssue issue = new ReviewIssue();
+        issue.severity = Severity.high;
+        issue.category = "security";
+        issue.file = "src/Auth.go";
+        issue.line = 42;
+        issue.body = "Token is logged.";
+        issue.evidence = "log.Printf(\"token=%s\", token)";
+        issue.impact = "Secrets can leak into logs.";
+        issue.suggestion = "Remove token logging.";
+        issue.confidence = 0.9;
+        result.issues = List.of(issue);
+
+        Path report = new ReportWriter(tmp.resolve("report")).write(result, Map.of(
+                "target", "repo_audit",
+                "coverage_summary", Map.of(
+                        "files_total", 2,
+                        "reviewable_files", 1,
+                        "slices_total", 1,
+                        "status_counts", Map.of("reviewed", 1),
+                        "skip_reasons", Map.of("binary", 1)
+                ),
+                "static_checks", List.of(Map.of("command", "go test ./...", "status", "passed", "exit_code", 0, "output", "ok ./...")),
+                "lsp_context", Map.of("enabled", true, "status", "partial", "errors", List.of(Map.of("language", "go", "status", "missing")))
+        ), Map.of("title", "Code Review Report: owner/repo", "executive_summary", "done"));
+
+        String markdown = Files.readString(report, StandardCharsets.UTF_8);
+        assertTrue(markdown.contains("## Context Summary"));
+        assertTrue(markdown.contains("| Files total | `2` |"));
+        assertTrue(markdown.contains("```go"));
+        assertTrue(markdown.contains("log.Printf"));
+        assertTrue(markdown.contains("<details>"));
+        assertTrue(markdown.contains("```json"));
+        assertFalse(markdown.contains("coverage_summary: `{"));
     }
 
     @Test
@@ -222,8 +271,8 @@ class JavaAgentTest {
                 tmp.resolve("quality-report"),
                 30,
                 12000,
-                2000
-        );
+                2000,
+                60000, 20000, true, true, 30);
         AgentRunResult result = testAgent(settings, (messages, tools, temperature) -> Map.of("choices", List.of(Map.of("message", Map.of(
                 "role", "assistant",
                 "content", """
@@ -256,8 +305,8 @@ class JavaAgentTest {
                 tmp.resolve("fp-report"),
                 30,
                 12000,
-                2000
-        );
+                2000,
+                60000, 20000, true, true, 30);
         MemoryTools memory = new MemoryTools(new MemoryStore(settings.memoryDir()));
         memory.memoryGetAll(Map.of());
         memory.memoryAddFalsePositive(Map.of(
@@ -293,8 +342,8 @@ class JavaAgentTest {
                 tmp.resolve("fix-report"),
                 30,
                 12000,
-                2000
-        );
+                2000,
+                60000, 20000, true, true, 30);
         AgentRunResult result = testAgent(settings, (messages, tools, temperature) -> Map.of("choices", List.of(Map.of("message", Map.of(
                 "role", "assistant",
                 "content", """
@@ -326,8 +375,8 @@ class JavaAgentTest {
                 tmp.resolve("live-report"),
                 30,
                 12000,
-                2000
-        );
+                2000,
+                60000, 20000, true, true, 30);
         AgentRunResult result = testAgent(settings, (messages, tools, temperature) -> Map.of("choices", List.of(Map.of("message", Map.of(
                 "role", "assistant",
                 "content", """
@@ -360,8 +409,8 @@ class JavaAgentTest {
                 tmp.resolve("commit-report"),
                 30,
                 12000,
-                2000
-        );
+                2000,
+                60000, 20000, true, true, 30);
         AgentRunResult result = testAgent(settings, new FakeLlmClient()).reviewCommits("owner/repo", "base-sha", "head-sha");
         assertEquals("completed", result.status);
         assertTrue(result.tracePath.toFile().exists());
@@ -413,15 +462,74 @@ class JavaAgentTest {
     }
 
     @Test
+    void llmIntentRouterClassifiesRepoAuditAndCommitDiff() {
+        LlmIntentRouter auditRouter = new LlmIntentRouter((messages, tools, temperature) -> Map.of("choices", List.of(Map.of("message", Map.of(
+                "role", "assistant",
+                "content", "{\"type\":\"REPO_AUDIT\",\"repo\":\"owner/repo\",\"pr\":null,\"base\":null,\"head\":null,\"dry_run\":null,\"confidence\":0.96,\"reason\":\"whole repo\"}"
+        )))));
+        ChatCommandParser.ChatIntent audit = auditRouter.route("对整个 owner/repo 做 CR");
+        assertEquals(ChatCommandParser.Type.REPO_AUDIT, audit.type());
+        assertEquals("owner/repo", audit.repo());
+
+        LlmIntentRouter commitRouter = new LlmIntentRouter((messages, tools, temperature) -> Map.of("choices", List.of(Map.of("message", Map.of(
+                "role", "assistant",
+                "content", "{\"type\":\"COMMITS\",\"repo\":\"owner/repo\",\"pr\":null,\"base\":\"abc1234\",\"head\":\"def5678\",\"dry_run\":false,\"confidence\":0.95,\"reason\":\"two refs\"}"
+        )))));
+        ChatCommandParser.ChatIntent commits = commitRouter.route("review owner/repo 从 abc1234 到 def5678");
+        assertEquals(ChatCommandParser.Type.COMMITS, commits.type());
+        assertEquals("abc1234", commits.base());
+        assertEquals("def5678", commits.head());
+        assertFalse(commits.dryRunOverride());
+    }
+
+    @Test
+    void llmIntentRouterFallsBackToRules() {
+        LlmIntentRouter router = new LlmIntentRouter((messages, tools, temperature) -> Map.of("choices", List.of(Map.of("message", Map.of(
+                "role", "assistant",
+                "content", "not json"
+        )))));
+        ChatCommandParser.ChatIntent intent = router.route("review https://github.com/owner/repo/compare/main...feature");
+        assertEquals(ChatCommandParser.Type.COMMITS, intent.type());
+        assertEquals("main", intent.base());
+        assertEquals("feature", intent.head());
+    }
+
+    @Test
+    void repoAuditIndexerBuildsFullCoverageWithoutSampling() throws Exception {
+        Path repo = tmp.resolve("fixture-repo");
+        Files.createDirectories(repo.resolve("src"));
+        Files.createDirectories(repo.resolve("node_modules/pkg"));
+        Files.writeString(repo.resolve("src/Auth.java"), "class Auth { String token; }\n", StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("README.md"), "# docs\n", StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("node_modules/pkg/index.js"), "ignored\n", StandardCharsets.UTF_8);
+        Settings settings = new Settings("url", "", "model", "", true, tmp.resolve("traces"), tmp.resolve("memory"), tmp.resolve("report"),
+                30, 12000, 2000, 10, 20, false, true, 30);
+
+        RepoAuditIndexer.AuditIndex index = new RepoAuditIndexer(settings).index(repo);
+        assertEquals(2, index.files().size());
+        assertTrue(index.files().stream().anyMatch(file -> file.path().equals("src/Auth.java")));
+        assertTrue(index.skipped().stream().anyMatch(item -> "vendor_cache".equals(item.get("reason"))));
+        assertFalse(index.slices().isEmpty());
+        List<List<RepoAuditIndexer.AuditSlice>> batches = new RepoAuditIndexer(settings).batches(index.slices());
+        long covered = batches.stream().flatMap(List::stream).map(RepoAuditIndexer.AuditSlice::path).distinct().count();
+        assertEquals(2, covered);
+    }
+
+    @Test
     void settingsLoadExplicitEnvFile() throws Exception {
         Path env = tmp.resolve(".env");
-        Files.writeString(env, "OPENAI_BASE_URL=https://example.test/v1\nOPENAI_API_KEY=secret\nOPENAI_MODEL=model-x\nCR_AGENT_DRY_RUN=false\nCR_AGENT_REPORT_DIR=custom-report\nCR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD=1234\n", StandardCharsets.UTF_8);
+        Files.writeString(env, "OPENAI_BASE_URL=https://example.test/v1\nOPENAI_API_KEY=secret\nOPENAI_MODEL=model-x\nCR_AGENT_DRY_RUN=false\nCR_AGENT_REPORT_DIR=custom-report\nCR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD=1234\nCR_AGENT_REPO_AUDIT_BATCH_TOKEN_BUDGET=4567\nCR_AGENT_REPO_AUDIT_MAX_FILE_CHARS=8910\nCR_AGENT_REPO_AUDIT_RUN_CHECKS=false\nCR_AGENT_LSP_ENABLED=false\nCR_AGENT_LSP_TIMEOUT_SECONDS=7\n", StandardCharsets.UTF_8);
         Settings settings = Settings.load(env);
         assertEquals("https://example.test/v1", settings.openaiBaseUrl());
         assertEquals("secret", settings.openaiApiKey());
         assertEquals("model-x", settings.openaiModel());
         assertTrue(settings.reportDir().endsWith("custom-report"));
         assertEquals(1234, settings.humanReviewChangedLinesThreshold());
+        assertEquals(4567, settings.repoAuditBatchTokenBudget());
+        assertEquals(8910, settings.repoAuditMaxFileChars());
+        assertFalse(settings.repoAuditRunChecks());
+        assertFalse(settings.lspEnabled());
+        assertEquals(7, settings.lspTimeoutSeconds());
         assertTrue(settings.hasLlmCredentials());
         assertFalse(settings.dryRun());
     }
@@ -452,10 +560,10 @@ class JavaAgentTest {
     @Test
     void exportsSftAndDpoDatasets() throws Exception {
         Path traces = tmp.resolve("traces");
-        Settings good = new Settings("url", "", "model", "", true, traces, tmp.resolve("memory"), tmp.resolve("report"), 30, 12000, 2000);
+        Settings good = new Settings("url", "", "model", "", true, traces, tmp.resolve("memory"), tmp.resolve("report"), 30, 12000, 2000, 60000, 20000, true, true, 30);
         testAgent(good, new FakeLlmClient()).review("owner/repo", 1);
 
-        Settings bad = new Settings("url", "", "model", "", true, traces, tmp.resolve("memory2"), tmp.resolve("report2"), 0, 12000, 2000);
+        Settings bad = new Settings("url", "", "model", "", true, traces, tmp.resolve("memory2"), tmp.resolve("report2"), 0, 12000, 2000, 60000, 20000, true, true, 30);
         testAgent(bad, new FakeLlmClient()).review("owner/repo", 2);
 
         TraceDatasetExporter exporter = new TraceDatasetExporter();

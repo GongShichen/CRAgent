@@ -135,6 +135,18 @@ public final class GitEnvironment {
         }
     }
 
+    public static RepositoryLease acquireRepository(String repo) {
+        Path existing = findLocalRepository(repo);
+        if (existing != null) {
+            return new RepositoryLease(existing, null, false);
+        }
+        CloneResult clone = cloneRepository(repo);
+        if (clone == null) {
+            return null;
+        }
+        return new RepositoryLease(clone.repoPath(), clone.cleanupPath(), true);
+    }
+
     private static CloneResult cloneRepository(String repo) {
         String normalized = ChatCommandParser.normalizeRepo(repo);
         if (normalized == null) {
@@ -359,6 +371,20 @@ public final class GitEnvironment {
 
     public record LocalReviewContext(java.nio.file.Path repoPath, java.util.List<java.util.Map<String, Object>> changedFiles, String diff,
                                      java.util.List<java.util.Map<String, Object>> commits, String author, boolean temporaryClone) {
+    }
+
+    public record RepositoryLease(Path repoPath, Path cleanupPath, boolean temporaryClone) implements AutoCloseable {
+        @Override
+        public void close() {
+            if (cleanupPath == null) {
+                return;
+            }
+            try {
+                deleteRecursively(cleanupPath);
+            } catch (IOException ignored) {
+                // Best effort cleanup.
+            }
+        }
     }
 
     private record CloneResult(Path repoPath, Path cleanupPath) {
