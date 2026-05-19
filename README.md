@@ -2,13 +2,13 @@
 
 ![CR-Agent architecture](docs/architecture.svg)
 
-CR-Agent 是一个 Java 实现的 agentic code review 系统。它可以通过命令行或 chat CLI 接收自然语言输入，解析 GitHub PR、仓库链接、compare URL 或 commit range，然后自动收集上下文、执行多阶段代码审查、记录完整轨迹，并导出 SFT/DPO 训练数据。
+CR-Agent 是一个 Java 实现的 agentic code review 系统。它面向 PR、commit diff、默认分支最新提交和全量仓库审查，能够自动识别 review 目标、收集上下文、执行多阶段代码审查、记录完整轨迹，并导出 SFT/DPO 训练数据。
 
 当前主 agent 使用 Java/Gradle 工程实现，SFT/DPO 训练脚本保留在 Python 侧。
 
 ## 核心能力
 
-- 自然语言 chat 入口：先由 LLM 识别用户是在请求全量仓库 CR、commit diff CR、PR CR 还是默认最新提交 CR。
+- LLM 意图识别：判断任务是全量仓库 CR、commit diff CR、PR CR，还是默认最新提交 CR。
 - PR review：读取 GitHub PR 元信息、diff、changed files、review comments、CI checks 和仓库上下文。
 - Commit range review：支持 `base...head`，也支持只给仓库时默认审查默认分支最新提交区间。
 - 全量仓库 CR：当用户明确说“整个仓库/全量/全部代码/repo audit”时触发，不做抽样，采用渐进式加载覆盖全部可审查文件。
@@ -35,7 +35,7 @@ CR-Agent/
 │   ├── settings.gradle.kts
 │   ├── src/main/java/com/cragent/
 │   │   ├── agent/          # CodeReviewAgent 主流程与结果解析
-│   │   ├── cli/            # CLI、chat parser、本机 Git/GitHub token 检查
+│   │   ├── cli/            # 运行入口、意图解析、本机 Git/GitHub token 检查
 │   │   ├── config/         # .env 与环境变量配置
 │   │   ├── datasets/       # SFT/DPO/tool-supervision 导出
 │   │   ├── llm/            # OpenAI-compatible LLM client
@@ -81,8 +81,8 @@ CR-Agent 现在不是两套割裂流程，而是“共享 CR 节点库 + 不同�
 - `EvidenceValidationNode`：统一实现 diff CR 与全量 CR 的证据校验、去重、置信度校准和 false-positive memory 过滤。
 - `LspAnalyzer` / `JsonRpcLspClient` / `LspServerRegistry`：真实 LSP JSON-RPC、server 探测与缺失提示。
 
-1. `CrAgentCli` 接收命令或启动 `chat`。
-2. chat 模式先加载 `code-review-intent` skill，由 LLM 输出 `REPO_AUDIT|COMMITS|PR|REPO_LATEST|HELP|EXIT|UNKNOWN`；模型失败时 fallback 到规则 parser。
+1. `CrAgentCli` 启动 agent 运行入口。
+2. 意图识别节点加载 `code-review-intent` skill，由 LLM 输出 `REPO_AUDIT|COMMITS|PR|REPO_LATEST|HELP|EXIT|UNKNOWN`；模型失败时 fallback 到规则 parser。
 3. 如果是 repo-only 且没有“全量/整个仓库”语义，agent 会尝试读取默认分支最新提交区间。
 4. `GitEnvironment` 优先使用本机 Git 环境和本地 clone 生成 review context。
 5. 如果本机没有 clone，agent 会临时 clone 到项目根的 `target-project/`，生成上下文后无论成功失败都会清理。
@@ -113,7 +113,7 @@ RepoAcquire -> RepoIndex -> LSPContext -> RiskModel -> StaticChecks -> Progressi
 - Go：`gopls`
 - Rust：`rust-analyzer`
 
-如果 `CR_AGENT_LSP_ENABLED=true` 且对应 server 未安装，agent 会在 chat 启动时提示缺失项和安装方法，但不会自动安装。任务执行中如果遇到对应语言的 server 缺失，会跳过该语言的 LSP 并继续后续 CR；agent 不会用正则结果伪装 LSP 输出。
+如果 `CR_AGENT_LSP_ENABLED=true` 且对应 server 未安装，agent 会在启动时提示缺失项和安装方法，但不会自动安装。任务执行中如果遇到对应语言的 server 缺失，会跳过该语言的 LSP 并继续后续 CR；agent 不会用正则结果伪装 LSP 输出。
 
 ## 配置
 
@@ -215,7 +215,7 @@ sdk install java 21.0.6-tem
 brew install openjdk@21
 ```
 
-chat 启动时会检查 LSP server。缺失时请按需自行安装：
+agent 启动时会检查 LSP server。缺失时请按需自行安装：
 
 ```bash
 npm install -g typescript typescript-language-server pyright
@@ -229,7 +229,7 @@ brew install jdtls
 1. 打开 `CR-Agent/cr_agent/`。
 2. 选择 Gradle JVM 为 JDK 21+。
 3. 使用 Gradle task `run` 或 `test`。
-4. 使用 Gradle task `run` 启动 chat。
+4. 使用 Gradle task `run` 启动 agent。
 
 注意：建议从 `cr_agent/` 目录运行命令。此时 agent 会读取父目录 `../.env`，也会读取当前目录 `.env`；当前目录 `.env` 优先级最高。
 
@@ -242,13 +242,13 @@ cd cr_agent
 ./gradlew test
 ```
 
-启动自然语言 chat：
+启动 agent：
 
 ```bash
 ./gradlew run
 ```
 
-chat 示例输入：
+示例任务描述：
 
 ```text
 帮我 review https://github.com/GongShichen/JTravelAgent.git
@@ -263,13 +263,13 @@ live review owner/name 从 6e83187b 到 0224b0ec
 
 ## 使用方式
 
-当前 Java agent 只保留 chat 模式，不再通过命令行参数触发任务：
+当前 Java agent 通过一个统一运行入口接收任务描述，不再通过命令行参数触发不同 review 类型：
 
 ```bash
 ./gradlew run
 ```
 
-进入 chat 后用自然语言告诉 agent 要 review 的对象，例如 PR、两个 commit、仓库最新提交或全量仓库 CR。
+启动后告诉 agent 要 review 的对象，例如 PR、两个 commit、仓库最新提交或全量仓库 CR。
 
 LSP 工具也可以被 agent 调用：
 
@@ -283,7 +283,7 @@ lsp_hover
 lsp_diagnostics
 ```
 
-Git、GitHub token、memory、trace 和 dataset 导出能力仍在代码中保留给内部流程使用；对用户入口只暴露 chat。
+Git、GitHub token、memory、trace 和 dataset 导出能力仍在代码中保留给内部流程使用；对外只保留统一运行入口。
 
 ## Review 输出
 

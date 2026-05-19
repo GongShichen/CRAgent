@@ -1,142 +1,163 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
-  <title id="title">CR-Agent architecture</title>
-  <desc id="desc">Architecture diagram for the Java code review agent, including chat CLI, settings, local Git and GitHub context, four review phases, tools, memory, traces, dataset export, and Python training.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120" role="img" aria-labelledby="title desc">
+  <title id="title">CR-Agent current architecture</title>
+  <desc id="desc">Current Java CR-Agent architecture with LLM intent routing, shared review nodes, diff review, full repository audit, LSP preflight, traces, memory, reports, datasets, and Python training.</desc>
   <defs>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#17324d" flood-opacity="0.14"/>
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#1b334a" flood-opacity="0.13"/>
     </filter>
     <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-      <path d="M2,2 L10,6 L2,10 Z" fill="#45627f"/>
+      <path d="M2,2 L10,6 L2,10 Z" fill="#48637d"/>
     </marker>
     <style>
       .bg { fill: #f7fafc; }
-      .title { font: 700 42px Arial, sans-serif; fill: #18324a; }
-      .subtitle { font: 400 20px Arial, sans-serif; fill: #55708a; }
-      .section { font: 700 22px Arial, sans-serif; fill: #18324a; }
-      .label { font: 700 18px Arial, sans-serif; fill: #17324d; }
-      .small { font: 400 15px Arial, sans-serif; fill: #4d6680; }
-      .tiny { font: 400 13px Arial, sans-serif; fill: #5e768d; }
-      .box { rx: 16; filter: url(#shadow); stroke-width: 1.5; }
-      .input { fill: #ffffff; stroke: #b8c7d7; }
-      .core { fill: #e7f0ff; stroke: #76a7e8; }
-      .phase { fill: #ffffff; stroke: #8ca9c6; }
-      .tool { fill: #eff9f4; stroke: #74b58d; }
-      .store { fill: #fff6e8; stroke: #e5aa55; }
-      .train { fill: #f4efff; stroke: #a68be8; }
-      .warn { fill: #fff0f0; stroke: #e08d8d; }
-      .line { stroke: #45627f; stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
-      .softline { stroke: #8da2b6; stroke-width: 1.8; fill: none; marker-end: url(#arrow); stroke-dasharray: 6 6; }
+      .title { font: 700 44px Arial, sans-serif; fill: #16324a; }
+      .subtitle { font: 400 20px Arial, sans-serif; fill: #546f88; }
+      .section { font: 700 22px Arial, sans-serif; fill: #16324a; }
+      .label { font: 700 17px Arial, sans-serif; fill: #17324d; }
+      .small { font: 400 15px Arial, sans-serif; fill: #435f79; }
+      .tiny { font: 400 13px Arial, sans-serif; fill: #58728a; }
+      .box { rx: 12; filter: url(#shadow); stroke-width: 1.4; }
+      .entry { fill: #ffffff; stroke: #b6c7d8; }
+      .core { fill: #e9f2ff; stroke: #7aaae8; }
+      .node { fill: #ffffff; stroke: #8ca8c5; }
+      .tool { fill: #edf8f2; stroke: #70b487; }
+      .store { fill: #fff6e8; stroke: #e0a54d; }
+      .train { fill: #f3efff; stroke: #a389e7; }
+      .safety { fill: #fff0f0; stroke: #df8a8a; }
+      .report { fill: #eef8ff; stroke: #73acd2; }
+      .line { stroke: #48637d; stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
+      .softline { stroke: #8da2b5; stroke-width: 1.8; fill: none; marker-end: url(#arrow); stroke-dasharray: 6 6; }
     </style>
   </defs>
 
-  <rect class="bg" x="0" y="0" width="1600" height="980"/>
-  <text class="title" x="80" y="78">CR-Agent Java Architecture</text>
-  <text class="subtitle" x="80" y="112">Natural-language code review agent with local Git fallback, GitHub tools, memory, traces, and dataset export.</text>
+  <rect class="bg" x="0" y="0" width="1800" height="1120"/>
+  <text class="title" x="80" y="72">CR-Agent Java Architecture</text>
+  <text class="subtitle" x="80" y="106">Agentic code review system with LLM intent routing, shared review nodes, progressive full-repo audit, LSP context, reports, traces, and training data export.</text>
 
-  <rect class="box input" x="70" y="165" width="300" height="190"/>
-  <text class="section" x="95" y="205">Entry Points</text>
-  <text class="small" x="95" y="242">chat: natural language</text>
-  <text class="small" x="95" y="272">review: GitHub PR</text>
-  <text class="small" x="95" y="302">review-commits: base...head</text>
-  <text class="small" x="95" y="332">batch-review / inspect / export</text>
+  <rect class="box entry" x="70" y="155" width="310" height="160"/>
+  <text class="section" x="98" y="195">Agent Entry</text>
+  <text class="small" x="98" y="232">Command: ./gradlew run</text>
+  <text class="small" x="98" y="262">Task description input</text>
+  <text class="small" x="98" y="292">Unified review dispatcher</text>
 
-  <rect class="box store" x="70" y="405" width="300" height="210"/>
-  <text class="section" x="95" y="445">Configuration</text>
-  <text class="small" x="95" y="482">.env overrides shell env</text>
-  <text class="small" x="95" y="512">OPENAI_BASE_URL</text>
-  <text class="small" x="95" y="542">OPENAI_API_KEY / MODEL</text>
-  <text class="small" x="95" y="572">GITHUB_TOKEN fallback</text>
-  <text class="small" x="95" y="602">review threshold / dry-run</text>
+  <rect class="box store" x="70" y="355" width="310" height="210"/>
+  <text class="section" x="98" y="395">Startup Preflight</text>
+  <text class="small" x="98" y="432">Load .env and shell env</text>
+  <text class="small" x="98" y="462">Print missing LSP servers</text>
+  <text class="small" x="98" y="492">Show install hints only</text>
+  <text class="small" x="98" y="522">Never auto-install servers</text>
+  <text class="small" x="98" y="552">Git credentials checked on demand</text>
 
-  <rect class="box core" x="455" y="155" width="690" height="110"/>
-  <text class="section" x="485" y="198">CrAgentCli + ChatCommandParser</text>
-  <text class="small" x="485" y="232">Parse GitHub URLs, owner/repo, PR numbers, compare URLs, or repo-only requests.</text>
+  <rect class="box core" x="455" y="145" width="435" height="170"/>
+  <text class="section" x="485" y="185">LLM Intent Router</text>
+  <text class="small" x="485" y="222">Skill: code-review-intent</text>
+  <text class="small" x="485" y="252">REPO_AUDIT / COMMITS / PR</text>
+  <text class="small" x="485" y="282">REPO_LATEST / HELP / EXIT</text>
 
-  <rect class="box tool" x="455" y="310" width="315" height="150"/>
-  <text class="label" x="485" y="350">Local Git Context</text>
-  <text class="small" x="485" y="385">Prefer local clone and SSH/HTTPS</text>
-  <text class="small" x="485" y="415">diff, numstat, name-status, log</text>
+  <rect class="box tool" x="965" y="145" width="335" height="170"/>
+  <text class="section" x="995" y="185">Repository Acquire</text>
+  <text class="small" x="995" y="222">Prefer existing local clone</text>
+  <text class="small" x="995" y="252">Clone to target-project/ if missing</text>
+  <text class="small" x="995" y="282">Always cleanup temporary clones</text>
 
-  <rect class="box tool" x="830" y="310" width="315" height="150"/>
-  <text class="label" x="860" y="350">GitHub API Context</text>
-  <text class="small" x="860" y="385">PR, files, diff, checks, comments</text>
-  <text class="small" x="860" y="415">Used when local Git is unavailable</text>
+  <rect class="box safety" x="1375" y="145" width="335" height="170"/>
+  <text class="section" x="1405" y="185">Safety Defaults</text>
+  <text class="small" x="1405" y="222">Dry-run controlled by .env/task</text>
+  <text class="small" x="1405" y="252">Write failures are warnings</text>
+  <text class="small" x="1405" y="282">Full repo audit is read-only</text>
 
-  <rect class="box core" x="455" y="520" width="690" height="235"/>
-  <text class="section" x="485" y="560">CodeReviewAgent Pipeline</text>
-  <rect class="box phase" x="485" y="590" width="115" height="110"/>
-  <text class="label" x="510" y="632">Triage</text>
-  <text class="tiny" x="505" y="662">risk gates</text>
-  <text class="tiny" x="505" y="684">large PR</text>
-  <rect class="box phase" x="620" y="590" width="115" height="110"/>
-  <text class="label" x="641" y="632">Analyze</text>
-  <text class="tiny" x="640" y="662">context</text>
-  <text class="tiny" x="640" y="684">risk model</text>
-  <rect class="box phase" x="755" y="590" width="115" height="110"/>
-  <text class="label" x="779" y="632">Review</text>
-  <text class="tiny" x="775" y="662">JSON issues</text>
-  <text class="tiny" x="775" y="684">tests</text>
-  <rect class="box phase" x="890" y="590" width="115" height="110"/>
-  <text class="label" x="930" y="632">Act</text>
-  <text class="tiny" x="910" y="662">comments</text>
-  <text class="tiny" x="910" y="684">memory</text>
-  <rect class="box phase" x="1025" y="590" width="115" height="110"/>
-  <text class="label" x="1050" y="632">Report</text>
-  <text class="tiny" x="1045" y="662">skill node</text>
-  <text class="tiny" x="1045" y="684">markdown</text>
-  <path class="line" d="M600 645 H615"/>
-  <path class="line" d="M735 645 H750"/>
-  <path class="line" d="M870 645 H885"/>
-  <path class="line" d="M1005 645 H1020"/>
-  <text class="small" x="485" y="733">Evidence validation filters weak findings, validates diff lines, deduplicates issues, and calibrates severity.</text>
+  <rect class="box core" x="455" y="375" width="390" height="245"/>
+  <text class="section" x="485" y="415">Diff / PR CR Scheduler</text>
+  <text class="small" x="485" y="452">Triage changed files and risk</text>
+  <text class="small" x="485" y="482">Analyze PR or commit diff</text>
+  <text class="small" x="485" y="512">Load local repo context when available</text>
+  <text class="small" x="485" y="542">Review changed lines only</text>
+  <text class="small" x="485" y="572">Act: comments, auto-fix, memory</text>
 
-  <rect class="box tool" x="1210" y="165" width="310" height="180"/>
-  <text class="section" x="1240" y="205">ToolRouter</text>
-  <text class="small" x="1240" y="242">Schema validation</text>
-  <text class="small" x="1240" y="272">Dry-run write interception</text>
-  <text class="small" x="1240" y="302">Large result truncation</text>
-  <text class="small" x="1240" y="332">Retry-safe tool execution</text>
+  <rect class="box core" x="910" y="375" width="430" height="245"/>
+  <text class="section" x="940" y="415">Full Repository Audit Scheduler</text>
+  <text class="small" x="940" y="452">RepoIndex from git ls-files</text>
+  <text class="small" x="940" y="482">Skip binary/generated/vendor/build</text>
+  <text class="small" x="940" y="512">Progressive batches, no sampling</text>
+  <text class="small" x="940" y="542">Coverage ledger: reviewed/skipped/failed</text>
+  <text class="small" x="940" y="572">Stop only after all slices finish</text>
 
-  <rect class="box tool" x="1210" y="385" width="310" height="250"/>
-  <text class="section" x="1240" y="425">Registered Tools</text>
-  <text class="small" x="1240" y="462">GitHub read/write tools</text>
-  <text class="small" x="1240" y="492">Memory tools</text>
-  <text class="small" x="1240" y="522">Test generation helpers</text>
-  <text class="small" x="1240" y="552">Search and context expansion</text>
-  <text class="small" x="1240" y="582">Auto-fix PR primitives</text>
-  <text class="small" x="1240" y="612">Health report aggregation</text>
+  <rect class="box tool" x="1405" y="375" width="305" height="245"/>
+  <text class="section" x="1435" y="415">Context Tools</text>
+  <text class="small" x="1435" y="452">GitHub read/write tools</text>
+  <text class="small" x="1435" y="482">Repo audit tools</text>
+  <text class="small" x="1435" y="512">Test generation helpers</text>
+  <text class="small" x="1435" y="542">Memory tools</text>
+  <text class="small" x="1435" y="572">LSP JSON-RPC tools</text>
 
-  <rect class="box store" x="70" y="675" width="300" height="210"/>
-  <text class="section" x="95" y="715">Persistent State</text>
-  <text class="small" x="95" y="752">data/traces/*.jsonl</text>
-  <text class="small" x="95" y="782">data/memory/*.jsonl</text>
-  <text class="small" x="95" y="812">developer profiles</text>
-  <text class="small" x="95" y="842">repo patterns and false positives</text>
-  <text class="small" x="95" y="872">session inspection</text>
+  <rect class="box node" x="235" y="700" width="240" height="125"/>
+  <text class="label" x="265" y="742">Repo Context</text>
+  <text class="tiny" x="265" y="772">manifest, files, diff</text>
+  <text class="tiny" x="265" y="796">GitHub fallback</text>
 
-  <rect class="box train" x="455" y="805" width="315" height="110"/>
-  <text class="label" x="485" y="847">Dataset Export</text>
-  <text class="small" x="485" y="880">SFT, DPO, tool supervision JSONL</text>
+  <rect class="box node" x="520" y="700" width="240" height="125"/>
+  <text class="label" x="550" y="742">LSP Context</text>
+  <text class="tiny" x="550" y="772">symbols, diagnostics</text>
+  <text class="tiny" x="550" y="796">skip when server missing</text>
 
-  <rect class="box train" x="830" y="805" width="315" height="110"/>
-  <text class="label" x="860" y="847">Python Training</text>
-  <text class="small" x="860" y="880">train/sft_train.py and dpo_train.py</text>
+  <rect class="box node" x="805" y="700" width="240" height="125"/>
+  <text class="label" x="835" y="742">Review Strategy</text>
+  <text class="tiny" x="835" y="772">risk modeling</text>
+  <text class="tiny" x="835" y="796">context expansion</text>
 
-  <rect class="box warn" x="1210" y="705" width="310" height="180"/>
-  <text class="section" x="1240" y="745">Safety Defaults</text>
-  <text class="small" x="1240" y="782">Dry-run by default</text>
-  <text class="small" x="1240" y="812">Git writes require permission</text>
-  <text class="small" x="1240" y="842">Write failures do not block review</text>
+  <rect class="box node" x="1090" y="700" width="240" height="125"/>
+  <text class="label" x="1120" y="742">Test Reasoning</text>
+  <text class="tiny" x="1120" y="772">regression paths</text>
+  <text class="tiny" x="1120" y="796">concrete test gaps</text>
 
-  <path class="line" d="M370 240 C405 240 415 210 455 210"/>
-  <path class="line" d="M370 500 C405 500 415 220 455 220"/>
-  <path class="line" d="M800 265 V305"/>
-  <path class="line" d="M610 460 C610 490 650 500 710 520"/>
-  <path class="line" d="M985 460 C985 490 950 500 890 520"/>
-  <path class="line" d="M1145 635 C1175 635 1180 510 1210 510"/>
-  <path class="line" d="M1145 210 H1210"/>
-  <path class="softline" d="M800 755 V800"/>
-  <path class="softline" d="M370 780 C430 780 440 850 455 850"/>
-  <path class="softline" d="M770 860 H825"/>
-  <path class="softline" d="M1145 860 C1180 860 1185 800 1210 800"/>
+  <rect class="box node" x="1375" y="700" width="240" height="125"/>
+  <text class="label" x="1405" y="742">Evidence Validation</text>
+  <text class="tiny" x="1405" y="772">file/line/evidence checks</text>
+  <text class="tiny" x="1405" y="796">dedupe and severity</text>
+
+  <rect class="box report" x="235" y="900" width="350" height="145"/>
+  <text class="section" x="265" y="940">Report Node</text>
+  <text class="small" x="265" y="976">Skill: code-review-report</text>
+  <text class="small" x="265" y="1006">Markdown tables, code fences</text>
+  <text class="small" x="265" y="1036">Pretty JSON in details blocks</text>
+
+  <rect class="box store" x="650" y="900" width="300" height="145"/>
+  <text class="section" x="680" y="940">Runtime Artifacts</text>
+  <text class="small" x="680" y="976">data/traces/*.jsonl</text>
+  <text class="small" x="680" y="1006">memory/*.jsonl</text>
+  <text class="small" x="680" y="1036">report/*.md</text>
+
+  <rect class="box train" x="1015" y="900" width="300" height="145"/>
+  <text class="section" x="1045" y="940">Dataset Export</text>
+  <text class="small" x="1045" y="976">SFT JSONL</text>
+  <text class="small" x="1045" y="1006">DPO JSONL</text>
+  <text class="small" x="1045" y="1036">Tool supervision JSONL</text>
+
+  <rect class="box train" x="1380" y="900" width="300" height="145"/>
+  <text class="section" x="1410" y="940">Python Training</text>
+  <text class="small" x="1410" y="976">train/sft_train.py</text>
+  <text class="small" x="1410" y="1006">train/dpo_train.py</text>
+  <text class="small" x="1410" y="1036">model/&lt;model_name&gt;/</text>
+
+  <path class="line" d="M380 235 H450"/>
+  <path class="line" d="M380 460 C410 420 430 300 455 240"/>
+  <path class="line" d="M890 230 H960"/>
+  <path class="line" d="M1300 230 H1370"/>
+  <path class="line" d="M670 315 C600 340 580 360 585 375"/>
+  <path class="line" d="M735 315 C860 335 980 350 1080 375"/>
+  <path class="line" d="M845 500 H905"/>
+  <path class="line" d="M1340 500 H1400"/>
+  <path class="softline" d="M650 620 C570 650 460 670 355 700"/>
+  <path class="softline" d="M650 620 C650 650 645 670 640 700"/>
+  <path class="softline" d="M925 620 V695"/>
+  <path class="softline" d="M1125 620 C1140 650 1170 675 1210 700"/>
+  <path class="softline" d="M1210 620 C1300 650 1410 670 1495 700"/>
+  <path class="line" d="M475 762 H515"/>
+  <path class="line" d="M760 762 H800"/>
+  <path class="line" d="M1045 762 H1085"/>
+  <path class="line" d="M1330 762 H1370"/>
+  <path class="line" d="M1495 825 C1460 870 760 860 410 900"/>
+  <path class="softline" d="M410 1045 C470 1070 675 1070 800 1045"/>
+  <path class="softline" d="M950 972 H1010"/>
+  <path class="softline" d="M1315 972 H1375"/>
 </svg>
