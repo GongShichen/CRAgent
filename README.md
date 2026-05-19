@@ -1,5 +1,7 @@
 # CR-Agent
 
+> 注：本 README 由 GPT-5.5 生成。
+
 ![CR-Agent architecture](docs/architecture.svg)
 
 CR-Agent 是一个 Java 实现的 agentic code review 系统。它面向 PR、commit diff、默认分支最新提交和全量仓库审查，能够自动识别 review 目标、收集上下文、执行多阶段代码审查、记录完整轨迹，并导出 SFT/DPO 训练数据。
@@ -441,5 +443,3 @@ cd cr_agent
 - 确认 GitHub token 权限后，再切换到 `CR_AGENT_DRY_RUN=false`。
 - 对超大 PR，可调高或调低 `CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD`。
 - 写权限失败不应阻塞 review，agent 会继续输出 summary、issues、actions 和 trace。
-
-> 注：本 README 由 GPT-5.5 生成。
