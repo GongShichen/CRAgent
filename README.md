@@ -441,3 +441,5 @@ cd cr_agent
 - 确认 GitHub token 权限后，再切换到 `CR_AGENT_DRY_RUN=false`。
 - 对超大 PR，可调高或调低 `CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD`。
 - 写权限失败不应阻塞 review，agent 会继续输出 summary、issues、actions 和 trace。
+
+> 注：本 README 由 GPT-5.5 生成。
