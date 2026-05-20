@@ -15,6 +15,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public final class EvidenceValidationNode {
@@ -23,8 +25,8 @@ public final class EvidenceValidationNode {
 
     public static ReviewResult validateDiff(ReviewResult input, Map<String, Object> triage, Map<String, Object> analysis, TraceRecorder trace) {
         trace.record("strategy_start", Map.of("strategy", "Evidence Validation"));
-        Map<String, Set<Integer>> changedLines = changedLinesByFile(triage.get("changed_files"));
-        Set<String> changedFiles = changedLines.keySet();
+        Map<String, DiffEvidence> diffEvidence = diffEvidenceByFile(triage.get("changed_files"));
+        Set<String> changedFiles = diffEvidence.keySet();
         List<ReviewIssue> clean = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         int originalCount = input.issues.size();
@@ -36,7 +38,30 @@ public final class EvidenceValidationNode {
                 trace.record("issue_filtered", Map.of("reason", "file_not_changed", "file", issue.file, "body", issue.body));
                 continue;
             }
-            if (issue.confidence < 0.45) {
+            issue.category = normalizeCategory(issue.category);
+            DiffEvidence evidence = diffEvidence.get(issue.file);
+            EvidenceScore score = scoreDiffEvidence(issue, evidence, analysis);
+            if (issue.line != null && !score.lineValid()) {
+                Integer inferredLine = inferLineFromEvidence(issue, evidence);
+                if (inferredLine != null) {
+                    trace.record("issue_line_repaired", Map.of("file", issue.file, "from", issue.line, "to", inferredLine));
+                    issue.line = inferredLine;
+                    score = scoreDiffEvidence(issue, evidence, analysis);
+                } else {
+                    trace.record("issue_line_cleared", Map.of("reason", "line_not_in_diff", "file", issue.file, "line", issue.line));
+                    issue.line = null;
+                    score = scoreDiffEvidence(issue, evidence, analysis);
+                }
+            } else if (issue.line == null) {
+                Integer inferredLine = inferLineFromEvidence(issue, evidence);
+                if (inferredLine != null) {
+                    issue.line = inferredLine;
+                    score = scoreDiffEvidence(issue, evidence, analysis);
+                }
+            }
+            issue.candidateScore = candidateScore(issue, score, analysis);
+            issue.confidence = calibratedConfidence(issue.confidence, score);
+            if (isLowValueStyleIssue(issue)) {
                 trace.record("issue_filtered", Map.of("reason", "low_confidence", "file", issue.file, "confidence", issue.confidence));
                 continue;
             }
@@ -44,18 +69,15 @@ public final class EvidenceValidationNode {
                 trace.record("issue_filtered", Map.of("reason", "false_positive_memory", "file", issue.file, "body", issue.body));
                 continue;
             }
-            if (issue.line != null && !changedLineValid(changedLines.get(issue.file), issue.line)) {
-                trace.record("issue_line_cleared", Map.of("reason", "line_not_in_diff", "file", issue.file, "line", issue.line));
-                issue.line = null;
-            }
-            issue.category = normalizeCategory(issue.category);
             issue.severity = calibratedSeverity(issue, analysis);
             if (issue.evidence == null || issue.evidence.isBlank()) {
-                issue.evidence = inferEvidence(issue, triage);
+                issue.evidence = inferEvidence(issue, triage, evidence);
             }
             String key = issueKey(issue);
             if (seen.add(key)) {
                 clean.add(issue);
+            } else {
+                trace.record("issue_filtered", Map.of("reason", "duplicate", "file", issue.file, "body", issue.body));
             }
         }
         input.issues = clean;
@@ -81,20 +103,29 @@ public final class EvidenceValidationNode {
         Set<String> seen = new HashSet<>();
         String checkText = Jsons.stringify(checks);
         for (ReviewIssue issue : input) {
-            if (issue.file == null || !files.containsKey(issue.file) || issue.confidence < 0.45) {
+            if (issue.file == null || !files.containsKey(issue.file)) {
                 continue;
             }
             if (matchesFalsePositive(issue, analysis)) {
                 trace.record("issue_filtered", Map.of("reason", "false_positive_memory", "file", issue.file, "body", issue.body));
                 continue;
             }
+            issue.category = normalizeCategory(issue.category);
             RepoAuditIndexer.AuditFile file = files.get(issue.file);
             if (issue.line != null && (issue.line < 1 || issue.line > Math.max(1, file.lines()))) {
                 issue.line = null;
             }
             String evidence = issue.evidence == null ? "" : issue.evidence.strip();
-            if (!evidence.isBlank() && !file.content().contains(evidence) && !checkText.contains(evidence)) {
+            boolean evidenceInSource = !evidence.isBlank() && containsNormalized(file.content(), evidence);
+            boolean evidenceInChecks = !evidence.isBlank() && containsNormalized(checkText, evidence);
+            boolean lspSupported = lspMentions(lspContext, issue.file, issue.line);
+            if (!evidence.isBlank() && !evidenceInSource && !evidenceInChecks) {
                 issue.confidence = Math.min(issue.confidence, 0.6);
+            }
+            issue.candidateScore = repoCandidateScore(issue, evidenceInSource, evidenceInChecks, lspSupported);
+            if (isLowValueStyleIssue(issue)) {
+                trace.record("issue_filtered", Map.of("reason", "low_confidence", "file", issue.file, "confidence", issue.confidence));
+                continue;
             }
             boolean lineInsideKnownSymbol = symbols.stream()
                     .filter(symbol -> issue.file.equals(String.valueOf(symbol.get("path"))))
@@ -104,6 +135,7 @@ public final class EvidenceValidationNode {
             if (!symbols.isEmpty() && issue.line != null && !lineInsideKnownSymbol && issue.confidence > 0.8) {
                 issue.confidence = 0.8;
             }
+            issue.severity = calibratedSeverity(issue, analysis);
             String key = issueKey(issue);
             if (seen.add(key)) {
                 out.add(issue);
@@ -111,6 +143,125 @@ public final class EvidenceValidationNode {
         }
         trace.record("phase_end", Map.of("phase", Phase.EVIDENCE_VALIDATION.name(), "before", input.size(), "after", out.size()));
         return out;
+    }
+
+    private record DiffEvidence(Set<Integer> changedLines, Map<Integer, String> addedLines, String patchText) {
+    }
+
+    private record EvidenceScore(double total, boolean lineValid, boolean evidenceMatchesChangedLine,
+                                 boolean evidenceMatchesPatch, boolean staticOrLspSupported, boolean hasImpact,
+                                 boolean hasSuggestion) {
+    }
+
+    private static EvidenceScore scoreDiffEvidence(ReviewIssue issue, DiffEvidence evidence, Map<String, Object> analysis) {
+        boolean lineValid = evidence != null && changedLineValid(evidence.changedLines(), issue.line);
+        boolean evidenceMatchesChangedLine = evidenceMatchesAddedLine(issue, evidence);
+        boolean evidenceMatchesPatch = evidenceMatchesPatch(issue, evidence);
+        boolean staticOrLspSupported = staticOrLspSupports(analysis, issue);
+        boolean hasImpact = issue.impact != null && issue.impact.strip().length() >= 12;
+        boolean hasSuggestion = issue.suggestion != null && issue.suggestion.strip().length() >= 8;
+        double score = 0.0;
+        if (lineValid) score += 0.35;
+        if (evidenceMatchesChangedLine) score += 0.35;
+        else if (evidenceMatchesPatch) score += 0.2;
+        if (staticOrLspSupported) score += 0.15;
+        if (hasImpact) score += 0.1;
+        if (hasSuggestion) score += 0.05;
+        return new EvidenceScore(Math.min(1.0, score), lineValid, evidenceMatchesChangedLine,
+                evidenceMatchesPatch, staticOrLspSupported, hasImpact, hasSuggestion);
+    }
+
+    private static double calibratedConfidence(double modelConfidence, EvidenceScore score) {
+        double base = Math.max(0.0, Math.min(1.0, modelConfidence));
+        double blended = (base * 0.55) + (score.total() * 0.45);
+        if (!score.lineValid() && !score.evidenceMatchesChangedLine() && !score.staticOrLspSupported()) {
+            blended = Math.min(blended, 0.52);
+        }
+        if (!score.hasImpact()) {
+            blended = Math.min(blended, 0.72);
+        }
+        return Math.max(0.0, Math.min(1.0, blended));
+    }
+
+    private static double minimumConfidence(ReviewIssue issue) {
+        if ("style".equals(issue.category) || "maintainability".equals(issue.category)) {
+            return 0.68;
+        }
+        if ("tests".equals(issue.category)) {
+            return 0.62;
+        }
+        return 0.55;
+    }
+
+    private static double candidateScore(ReviewIssue issue, EvidenceScore evidence, Map<String, Object> analysis) {
+        double score = 0.18 + (Math.max(0.0, Math.min(1.0, issue.confidence)) * 0.28);
+        score += evidence.total() * 0.32;
+        if (isHighSignalCategory(issue)) {
+            score += 0.12;
+        }
+        if ("tests".equals(issue.category) && concreteTestGap(issue, analysis)) {
+            score += 0.1;
+        }
+        if (riskModelSupports(issue, analysis)) {
+            score += 0.1;
+        }
+        if ("style".equals(issue.category) || "maintainability".equals(issue.category)) {
+            score -= 0.12;
+        }
+        return Math.max(0.0, Math.min(1.0, score));
+    }
+
+    private static double repoCandidateScore(ReviewIssue issue, boolean evidenceInSource, boolean evidenceInChecks, boolean lspSupported) {
+        double score = 0.15 + Math.max(0.0, Math.min(1.0, issue.confidence)) * 0.35;
+        if (evidenceInSource) score += 0.2;
+        if (evidenceInChecks) score += 0.15;
+        if (lspSupported) score += 0.15;
+        if (isHighSignalCategory(issue)) score += 0.1;
+        if ("style".equals(issue.category) || "maintainability".equals(issue.category)) score -= 0.1;
+        return Math.max(0.0, Math.min(1.0, score));
+    }
+
+    private static boolean isLowValueStyleIssue(ReviewIssue issue) {
+        return ("style".equals(issue.category) || "maintainability".equals(issue.category))
+                && issue.confidence < 0.45
+                && issue.candidateScore < 0.35;
+    }
+
+    private static boolean isHighSignalCategory(ReviewIssue issue) {
+        return "security".equals(issue.category) || "bug".equals(issue.category) || "performance".equals(issue.category);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean riskModelSupports(ReviewIssue issue, Map<String, Object> analysis) {
+        Object risk = analysis.get("risk_model");
+        if (!(risk instanceof Map<?, ?> map)) {
+            return false;
+        }
+        Object types = map.get("risk_types");
+        String text = String.valueOf(types).toLowerCase();
+        return switch (issue.category) {
+            case "security" -> text.contains("security") || text.contains("auth");
+            case "bug" -> text.contains("api") || text.contains("data") || text.contains("concurrency") || text.contains("general");
+            case "performance" -> text.contains("performance") || text.contains("concurrency");
+            case "tests" -> Boolean.TRUE.equals(((Map<String, Object>) map).get("has_behavior_change"));
+            default -> false;
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean concreteTestGap(ReviewIssue issue, Map<String, Object> analysis) {
+        if (!"tests".equals(issue.category)) {
+            return false;
+        }
+        Object regression = analysis.get("regression_test_reasoning");
+        if (!(regression instanceof Map<?, ?> map)) {
+            return false;
+        }
+        boolean likelyGap = Boolean.TRUE.equals(map.get("likely_test_gap"));
+        Object files = map.get("files_needing_test_consideration");
+        boolean fileNamed = files instanceof List<?> list && list.stream().anyMatch(item -> Objects.equals(String.valueOf(item), issue.file));
+        String text = (issue.body + "\n" + issue.evidence + "\n" + issue.impact).toLowerCase();
+        return likelyGap && fileNamed && containsAny(text, "untested", "test", "regression", "coverage", "case");
     }
 
     private static Severity calibratedSeverity(ReviewIssue issue, Map<String, Object> analysis) {
@@ -130,7 +281,10 @@ public final class EvidenceValidationNode {
         return issue.severity;
     }
 
-    private static String inferEvidence(ReviewIssue issue, Map<String, Object> triage) {
+    private static String inferEvidence(ReviewIssue issue, Map<String, Object> triage, DiffEvidence diffEvidence) {
+        if (diffEvidence != null && issue.line != null && diffEvidence.addedLines().containsKey(issue.line)) {
+            return "+" + diffEvidence.addedLines().get(issue.line);
+        }
         for (Map<String, Object> file : listOfMaps(triage.get("changed_files"))) {
             if (Objects.equals(issue.file, String.valueOf(file.get("filename")))) {
                 Object patch = file.get("patch");
@@ -186,25 +340,27 @@ public final class EvidenceValidationNode {
         return Map.of();
     }
 
-    private static Map<String, Set<Integer>> changedLinesByFile(Object changedFiles) {
-        Map<String, Set<Integer>> result = new HashMap<>();
+    private static Map<String, DiffEvidence> diffEvidenceByFile(Object changedFiles) {
+        Map<String, DiffEvidence> result = new HashMap<>();
         for (Map<String, Object> file : listOfMaps(changedFiles)) {
             String filename = String.valueOf(file.get("filename"));
             String patch = String.valueOf(file.getOrDefault("patch", ""));
-            result.put(filename, changedLinesFromPatch(patch));
+            result.put(filename, parseDiffEvidence(patch));
         }
         return result;
     }
 
-    private static Set<Integer> changedLinesFromPatch(String patch) {
+    private static DiffEvidence parseDiffEvidence(String patch) {
         Set<Integer> lines = new HashSet<>();
+        Map<Integer, String> addedLines = new LinkedHashMap<>();
         if (patch == null || patch.isBlank()) {
-            return lines;
+            return new DiffEvidence(lines, addedLines, "");
         }
         int currentNewLine = 0;
+        int syntheticLine = 1;
         boolean sawHunk = false;
         for (String line : patch.split("\\R")) {
-            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@.*").matcher(line);
+            Matcher matcher = Pattern.compile("@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@.*").matcher(line);
             if (matcher.matches()) {
                 sawHunk = true;
                 currentNewLine = Integer.parseInt(matcher.group(1));
@@ -212,21 +368,70 @@ public final class EvidenceValidationNode {
             }
             if (!sawHunk) {
                 if (line.startsWith("+") && !line.startsWith("+++")) {
-                    lines.add(1);
+                    lines.add(syntheticLine);
+                    addedLines.put(syntheticLine, line.substring(1));
+                    syntheticLine++;
                 }
                 continue;
             }
             if (line.startsWith("+") && !line.startsWith("+++")) {
-                lines.add(currentNewLine++);
+                lines.add(currentNewLine);
+                addedLines.put(currentNewLine, line.substring(1));
+                currentNewLine++;
             } else if (!line.startsWith("-")) {
                 currentNewLine++;
             }
         }
-        return lines;
+        return new DiffEvidence(lines, addedLines, patch);
     }
 
     private static boolean changedLineValid(Set<Integer> validLines, Integer line) {
-        return line == null || (validLines != null && validLines.contains(line));
+        return line != null && validLines != null && validLines.contains(line);
+    }
+
+    private static Integer inferLineFromEvidence(ReviewIssue issue, DiffEvidence evidence) {
+        if (evidence == null || evidence.addedLines().isEmpty()) {
+            return null;
+        }
+        String needle = strongestEvidenceText(issue);
+        if (needle.isBlank()) {
+            return null;
+        }
+        String normalizedNeedle = normalizeEvidence(needle);
+        for (Map.Entry<Integer, String> entry : evidence.addedLines().entrySet()) {
+            String line = normalizeEvidence(entry.getValue());
+            if (!line.isBlank() && (line.contains(normalizedNeedle) || normalizedNeedle.contains(line))) {
+                return entry.getKey();
+            }
+        }
+        return null;
+    }
+
+    private static boolean evidenceMatchesAddedLine(ReviewIssue issue, DiffEvidence evidence) {
+        if (evidence == null || evidence.addedLines().isEmpty()) {
+            return false;
+        }
+        String needle = normalizeEvidence(strongestEvidenceText(issue));
+        if (needle.isBlank()) {
+            return false;
+        }
+        return evidence.addedLines().values().stream()
+                .map(EvidenceValidationNode::normalizeEvidence)
+                .anyMatch(line -> !line.isBlank() && (line.contains(needle) || needle.contains(line)));
+    }
+
+    private static boolean evidenceMatchesPatch(ReviewIssue issue, DiffEvidence evidence) {
+        if (evidence == null || evidence.patchText() == null || evidence.patchText().isBlank()) {
+            return false;
+        }
+        return containsNormalized(evidence.patchText(), strongestEvidenceText(issue));
+    }
+
+    private static String strongestEvidenceText(ReviewIssue issue) {
+        if (issue.evidence != null && issue.evidence.strip().length() >= 4) {
+            return issue.evidence;
+        }
+        return "";
     }
 
     private static String normalizeCategory(String category) {
@@ -242,10 +447,31 @@ public final class EvidenceValidationNode {
     private static String issueKey(ReviewIssue issue) {
         return String.join("|",
                 nullToEmpty(issue.file),
-                String.valueOf(issue.line == null ? "" : issue.line),
                 nullToEmpty(issue.category),
-                semanticPrefix(issue.body)
+                issue.line == null ? "" : String.valueOf(issue.line),
+                duplicateAnchor(issue)
         ).toLowerCase();
+    }
+
+    private static String duplicateAnchor(ReviewIssue issue) {
+        String evidence = normalizeEvidence(issue.evidence);
+        if (!evidence.isBlank()) {
+            return evidence.length() > 160 ? evidence.substring(0, 160) : evidence;
+        }
+        return semanticSubject(issue.body + " " + issue.impact) + "|" + semanticPrefix(issue.body);
+    }
+
+    private static String semanticSubject(String text) {
+        String normalized = nullToEmpty(text).toLowerCase();
+        Matcher matcher = Pattern.compile("[a-zA-Z_][a-zA-Z0-9_./:-]{2,}").matcher(normalized);
+        List<String> terms = new ArrayList<>();
+        while (matcher.find() && terms.size() < 4) {
+            String term = matcher.group();
+            if (!Set.of("the", "and", "for", "with", "this", "that", "from", "line", "file").contains(term)) {
+                terms.add(term);
+            }
+        }
+        return String.join(" ", terms);
     }
 
     private static String semanticPrefix(String text) {
@@ -274,6 +500,50 @@ public final class EvidenceValidationNode {
             }
         }
         return false;
+    }
+
+    private static boolean containsNormalized(String haystack, String needle) {
+        String normalizedNeedle = normalizeEvidence(needle);
+        if (normalizedNeedle.isBlank()) {
+            return false;
+        }
+        return normalizeEvidence(haystack).contains(normalizedNeedle);
+    }
+
+    private static String normalizeEvidence(String value) {
+        if (value == null) {
+            return "";
+        }
+        String text = value.strip();
+        if (text.startsWith("+") || text.startsWith("-")) {
+            text = text.substring(1).strip();
+        }
+        return text.replaceAll("\\s+", " ").strip().toLowerCase();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean staticOrLspSupports(Map<String, Object> analysis, ReviewIssue issue) {
+        Object checks = analysis.get("static_checks");
+        if (checks != null && containsNormalized(Jsons.stringify(checks), issue.file)
+                && containsNormalized(Jsons.stringify(checks), strongestEvidenceText(issue))) {
+            return true;
+        }
+        Object lsp = analysis.get("lsp_context");
+        if (lsp instanceof Map<?, ?> map) {
+            return lspMentions((Map<String, Object>) map, issue.file, issue.line);
+        }
+        return false;
+    }
+
+    private static boolean lspMentions(Map<String, Object> lspContext, String file, Integer line) {
+        if (lspContext == null || lspContext.isEmpty()) {
+            return false;
+        }
+        String text = Jsons.stringify(lspContext);
+        if (!text.contains(file)) {
+            return false;
+        }
+        return line == null || text.contains("\"line\":" + line) || text.contains("\"start_line\":" + line) || text.contains("\"end_line\":" + line);
     }
 
     private static boolean globMatches(String glob, String value) {

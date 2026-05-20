@@ -35,7 +35,9 @@ cr_agent/data/
 # Training artifacts
 model/*/
 !model/.gitkeep
-datasets/SFT/*.jsonl
-datasets/DPO/*.jsonl
-!datasets/SFT/.gitkeep
-!datasets/DPO/.gitkeep
+datasets/RL/*.jsonl
+datasets/clean/
+datasets/raw/
+!datasets/RL/.gitkeep
+
+eval/

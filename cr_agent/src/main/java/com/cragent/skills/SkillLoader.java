@@ -8,7 +8,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.stream.Stream;
 
 public class SkillLoader {
@@ -69,6 +72,42 @@ public class SkillLoader {
         return readResource("skills/" + skillName + "/references/" + referenceName);
     }
 
+    public List<SkillDescriptor> languageSkillCatalog() {
+        List<SkillDescriptor> out = new ArrayList<>();
+        if (!Files.exists(skillsDir)) {
+            return out;
+        }
+        try (Stream<Path> stream = Files.list(skillsDir)) {
+            stream.filter(Files::isDirectory)
+                    .filter(path -> path.getFileName().toString().startsWith("code-review-lang-"))
+                    .sorted(Comparator.comparing(Path::toString))
+                    .forEach(path -> {
+                        Path skillMd = path.resolve("SKILL.md");
+                        if (Files.exists(skillMd)) {
+                            out.add(descriptorFromSkill(read(skillMd), path.getFileName().toString()));
+                        }
+                    });
+        } catch (IOException e) {
+            throw new IllegalStateException("Unable to scan language skills: " + skillsDir, e);
+        }
+        return out;
+    }
+
+    public String loadSelectedSkills(List<String> skillNames) {
+        List<String> parts = new ArrayList<>();
+        for (String skillName : skillNames) {
+            if (skillName == null || skillName.isBlank() || !skillName.startsWith("code-review-lang-")) {
+                continue;
+            }
+            try {
+                parts.add("===== " + skillName + " =====\n\n" + loadSkill(skillName, false));
+            } catch (RuntimeException ignored) {
+                // Missing optional language skill: keep loading the rest.
+            }
+        }
+        return String.join("\n\n", parts);
+    }
+
     public static String defaultPrompt() {
         SkillLoader loader = new SkillLoader();
         List<String> parts = new ArrayList<>();
@@ -113,6 +152,58 @@ public class SkillLoader {
             }
         }
         return text;
+    }
+
+    private static SkillDescriptor descriptorFromSkill(String text, String fallbackName) {
+        Map<String, String> frontmatter = parseFrontmatter(text);
+        return new SkillDescriptor(
+                frontmatter.getOrDefault("name", fallbackName),
+                frontmatter.getOrDefault("description", ""),
+                parseList(frontmatter.get("languages")),
+                parseList(frontmatter.get("file_patterns")),
+                parseList(frontmatter.get("risk_triggers")),
+                parseList(frontmatter.get("modes"))
+        );
+    }
+
+    private static Map<String, String> parseFrontmatter(String text) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (!text.startsWith("---")) {
+            return out;
+        }
+        int end = text.indexOf("\n---", 3);
+        if (end < 0) {
+            return out;
+        }
+        String[] lines = text.substring(3, end).split("\\R");
+        for (String line : lines) {
+            int idx = line.indexOf(':');
+            if (idx <= 0) {
+                continue;
+            }
+            String key = line.substring(0, idx).trim().toLowerCase(Locale.ROOT);
+            String value = line.substring(idx + 1).trim();
+            out.put(key, value);
+        }
+        return out;
+    }
+
+    private static List<String> parseList(String value) {
+        if (value == null || value.isBlank()) {
+            return List.of();
+        }
+        String normalized = value.trim();
+        if (normalized.startsWith("[") && normalized.endsWith("]")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        List<String> out = new ArrayList<>();
+        for (String part : normalized.split(",")) {
+            String item = part.trim().replaceAll("^['\"]|['\"]$", "");
+            if (!item.isBlank()) {
+                out.add(item);
+            }
+        }
+        return out;
     }
 
     private static String read(Path path) {

@@ -1,7 +1,11 @@
 package com.cragent;
 
 import com.cragent.agent.CodeReviewAgent;
+import com.cragent.agent.ContextEngine;
+import com.cragent.agent.EvidenceValidationNode;
+import com.cragent.agent.LlmAdvisoryNodes;
 import com.cragent.agent.ReportWriter;
+import com.cragent.agent.LanguageSkillRouter;
 import com.cragent.agent.RepoAuditIndexer;
 import com.cragent.agent.ReviewResultParser;
 import com.cragent.config.Settings;
@@ -18,9 +22,11 @@ import com.cragent.model.ToolResult;
 import com.cragent.cli.ChatCommandParser;
 import com.cragent.cli.PrIdentifier;
 import com.cragent.skills.SkillLoader;
+import com.cragent.skills.SkillDescriptor;
 import com.cragent.tools.ToolRouter;
 import com.cragent.tools.ToolSchemas;
 import com.cragent.tools.ToolSpec;
+import com.cragent.tools.AdvancedReviewTools;
 import com.cragent.tools.TestGenerationTools;
 import com.cragent.tools.MemoryTools;
 import com.cragent.memory.MemoryStore;
@@ -33,6 +39,7 @@ import java.nio.file.Files;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -156,8 +163,259 @@ class JavaAgentTest {
     }
 
     @Test
+    void advancedReviewToolsRegisterSecurityHistoryContractAndTestHelpers() {
+        TraceRecorder trace = new TraceRecorder(tmp.resolve("advanced-traces"));
+        ToolRouter router = new ToolRouter(true, trace, 12000);
+        Settings settings = new Settings(
+                "https://token-plan-cn.xiaomimimo.com/v1",
+                "",
+                "mimo-v2.5-pro",
+                "",
+                true,
+                tmp.resolve("traces"),
+                tmp.resolve("memory"),
+                tmp.resolve("report"),
+                30,
+                12000, true, true, 30);
+        new AdvancedReviewTools(settings).register(router);
+
+        assertTrue(router.hasTool("run_semgrep_scan"));
+        assertTrue(router.hasTool("run_dependency_vulnerability_scan"));
+        assertTrue(router.hasTool("candidate_evidence_bundle"));
+        assertTrue(router.hasTool("git_churn_hotspots"));
+        assertTrue(router.hasTool("detect_public_api_changes"));
+        assertTrue(router.hasTool("select_impacted_tests"));
+        assertTrue(router.hasTool("github_actions_permission_audit"));
+        assertTrue(router.hasTool("sbom_generate"));
+    }
+
+    @Test
+    void advancedReviewToolsAuditWorkflowAndApiDiffs() throws Exception {
+        Path repo = tmp.resolve("advanced-repo");
+        Files.createDirectories(repo.resolve(".github/workflows"));
+        Files.writeString(repo.resolve(".github/workflows/ci.yml"), """
+                name: ci
+                on: pull_request_target
+                permissions: write-all
+                jobs:
+                  test:
+                    runs-on: ubuntu-latest
+                    steps:
+                      - uses: actions/checkout@v4
+                      - run: echo "$SECRET_TOKEN"
+                """, StandardCharsets.UTF_8);
+
+        ToolRouter router = new ToolRouter(true, new TraceRecorder(tmp.resolve("advanced-run-traces")), 12000);
+        Settings settings = new Settings(
+                "https://token-plan-cn.xiaomimimo.com/v1",
+                "",
+                "mimo-v2.5-pro",
+                "",
+                true,
+                tmp.resolve("traces"),
+                tmp.resolve("memory"),
+                tmp.resolve("report"),
+                30,
+                12000, true, true, 30);
+        new AdvancedReviewTools(settings).register(router);
+
+        ToolResult workflow = router.call(new ToolCall("1", "github_actions_permission_audit", Map.of("repo_path", repo.toString())));
+        assertTrue(workflow.ok);
+        assertTrue(workflow.result.toString().contains("pull_request_target"));
+        assertTrue(workflow.result.toString().contains("broad_permissions"));
+
+        ToolResult api = router.call(new ToolCall("2", "detect_public_api_changes", Map.of(
+                "changed_files", List.of(Map.of(
+                        "filename", "src/main/java/com/acme/UserApi.java",
+                        "patch", """
+                                @@
+                                +public String displayName() {
+                                +  return name;
+                                +}
+                                """
+                ))
+        )));
+        assertTrue(api.ok);
+        assertTrue(api.result.toString().contains("public_api_surface"));
+    }
+
+    @Test
+    void contextEngineBuildsDiffPackIndexAndLedger() {
+        Settings settings = new Settings(
+                "https://token-plan-cn.xiaomimimo.com/v1",
+                "",
+                "mimo-v2.5-pro",
+                "",
+                true,
+                tmp.resolve("traces"),
+                tmp.resolve("memory"),
+                tmp.resolve("report"),
+                30,
+                12000, true, true, 30);
+        Map<String, Object> triage = Map.of(
+                "changed_files", List.of(Map.of(
+                        "filename", "src/AuthService.java",
+                        "additions", 2,
+                        "deletions", 0,
+                        "patch", """
+                                @@ -10,0 +11,2 @@
+                                +public boolean canDelete(User user) {
+                                +  return user.isAdmin() || user.isOwner();
+                                """
+                ))
+        );
+        Map<String, Object> analysis = new java.util.LinkedHashMap<>();
+        analysis.put("risk_model", Map.of("risk_types", List.of("security/auth"), "risk_level", "high"));
+        analysis.put("risk_probes", List.of(Map.of(
+                "id", 1,
+                "type", "boolean_permission",
+                "file", "src/AuthService.java",
+                "line", 11,
+                "evidence", "+  return user.isAdmin() || user.isOwner();",
+                "rationale", "Changed permission logic."
+        )));
+        analysis.put("context_expansion", Map.of(
+                "surrounding_contexts", List.of(Map.of("filename", "src/AuthService.java", "context", "9: class AuthService")),
+                "related_tests", List.of(Map.of("filename", "src/AuthService.java", "tests", Map.of("count", 1, "items", List.of("AuthServiceTest.java"))))
+        ));
+        analysis.put("lsp_context", Map.of("symbols_preview", List.of(Map.of("path", "src/AuthService.java", "name", "canDelete", "line", 11))));
+
+        Map<String, Object> context = ContextEngine.forDiff(settings, triage, analysis, new TraceRecorder(tmp.resolve("ctx-traces")));
+        assertEquals("diff", context.get("mode"));
+        assertTrue(context.toString().contains("changed_hunk"));
+        assertTrue(context.toString().contains("ctx-"));
+        Map<?, ?> ledger = (Map<?, ?>) context.get("context_ledger");
+        assertTrue(((Number) ledger.get("selected_items")).intValue() > 0);
+        assertEquals(60, ((Number) ledger.get("rrf_k")).intValue());
+        assertTrue(ledger.toString().contains("lexical_diff_terms"));
+        assertTrue(ledger.toString().contains("risk_probe"));
+        List<?> items = (List<?>) ((Map<?, ?>) context.get("context_pack")).get("items");
+        assertTrue(items.stream().anyMatch(item -> item instanceof Map<?, ?> map
+                && map.containsKey("rrf_score")
+                && map.containsKey("retrieval_channels")
+                && map.containsKey("channel_ranks")
+                && map.containsKey("why_selected")));
+        assertTrue(context.toString().contains("AuthService.java"));
+    }
+
+    @Test
+    void contextEngineBuildsRepoAuditAndBatchContext() throws Exception {
+        Path repo = tmp.resolve("ctx-repo");
+        Files.createDirectories(repo.resolve("src/main/java/com/acme"));
+        Files.createDirectories(repo.resolve("src/test/java/com/acme"));
+        Files.writeString(repo.resolve("src/main/java/com/acme/AuthService.java"), """
+                package com.acme;
+                public class AuthService {
+                  public boolean canDelete(User user) { return user.isAdmin(); }
+                }
+                """, StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("src/test/java/com/acme/AuthServiceTest.java"), """
+                package com.acme;
+                class AuthServiceTest {}
+                """, StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("pom.xml"), "<project></project>", StandardCharsets.UTF_8);
+
+        Settings settings = new Settings(
+                "https://token-plan-cn.xiaomimimo.com/v1",
+                "",
+                "mimo-v2.5-pro",
+                "",
+                true,
+                tmp.resolve("traces"),
+                tmp.resolve("memory"),
+                tmp.resolve("report"),
+                30,
+                12000, true, true, 30);
+        RepoAuditIndexer.AuditIndex index = new RepoAuditIndexer(settings).index(repo);
+        List<Map<String, Object>> manifest = index.files().stream().map(RepoAuditIndexer.AuditFile::manifest).toList();
+        Map<String, Object> lsp = Map.of("status", "available", "symbols_preview", List.of(Map.of("path", "src/main/java/com/acme/AuthService.java", "name", "AuthService", "line", 2)));
+        Map<String, Object> risk = Map.of("risk_level", "high", "stack", index.stack());
+        TraceRecorder trace = new TraceRecorder(tmp.resolve("ctx-repo-traces"));
+
+        Map<String, Object> repoContext = ContextEngine.forRepoAudit(settings, index, manifest, List.of(), risk, lsp, Map.of(), trace);
+        assertEquals("repo_audit", repoContext.get("mode"));
+        assertTrue(repoContext.toString().contains("repo_overview"));
+        assertTrue(repoContext.toString().contains("repo_rules_and_configs"));
+
+        Map<String, Object> batchContext = ContextEngine.forRepoBatch(settings, index.slices().stream().limit(1).toList(),
+                manifest, List.of(), risk, lsp, Map.of(), trace);
+        assertEquals("repo_batch", batchContext.get("mode"));
+        assertTrue(batchContext.toString().contains("batch_slice"));
+        assertTrue(batchContext.toString().contains("context_ledger"));
+        List<?> batchItems = (List<?>) ((Map<?, ?>) batchContext.get("context_pack")).get("items");
+        assertTrue(batchItems.stream().anyMatch(item -> item instanceof Map<?, ?> map
+                && "batch_slice".equals(map.get("type"))
+                && "selected_mandatory".equals(map.get("pack_decision"))
+                && String.valueOf(map.get("retrieval_channels")).contains("mandatory_batch_slice")));
+    }
+
+    @Test
+    void llmContextScoutFallsBackForMalformedOutput() {
+        Settings settings = new Settings(
+                "https://token-plan-cn.xiaomimimo.com/v1",
+                "",
+                "mimo-v2.5-pro",
+                "",
+                true,
+                tmp.resolve("traces"),
+                tmp.resolve("memory"),
+                tmp.resolve("report"),
+                30,
+                12000, true, true, 30);
+        LlmClient malformed = (messages, tools, temperature) -> Map.of("choices", List.of(Map.of("message", Map.of(
+                "role", "assistant",
+                "content", "not-json"
+        ))));
+        Map<String, Object> triage = Map.of("changed_files", List.of(Map.of(
+                "filename", "src/AuthService.java",
+                "patch", "+ return user.isAdmin() || user.isOwner();"
+        )));
+        Map<String, Object> analysis = Map.of("risk_model", Map.of("review_focus", List.of("permission logic")));
+        Map<String, Object> scout = LlmAdvisoryNodes.contextScout(settings, malformed, new TraceRecorder(tmp.resolve("scout-traces")), "diff", triage, analysis);
+        assertEquals("diff", scout.get("mode"));
+        assertTrue(scout.toString().contains("authservice"));
+        assertTrue(scout.toString().contains("permission"));
+    }
+
+    @Test
     void githubContextToolsRequireLiveCredentials() {
         assertFalse(new com.cragent.tools.GitHubTools("").available());
+    }
+
+    @Test
+    void rawSourceQueriesStayWithinSupportedNonBenchmarkLanguages() throws Exception {
+        Path queries = Path.of("..", "datasets", "raw", "source_queries.jsonl");
+        Path denylist = Path.of("..", "datasets", "raw", "denylist.json");
+        org.junit.jupiter.api.Assumptions.assumeTrue(Files.exists(queries) && Files.exists(denylist),
+                "raw dataset manifests are generated runtime inputs and may be absent in a clean checkout");
+
+        Set<String> supported = Set.of("typescript", "javascript", "python", "java", "kotlin", "go", "rust", "ruby",
+                "c", "cpp", "csharp", "php", "swift", "objective-c");
+        Set<String> benchmarkRepos = Set.of("grafana/grafana", "getsentry/sentry", "calcom/cal.com",
+                "keycloak/keycloak", "discourse/discourse");
+        int languages = 0;
+        int repoAuditEligible = 0;
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            Map<String, Object> row = com.cragent.util.Jsons.parseMap(line);
+            String language = String.valueOf(row.get("language"));
+            String repo = String.valueOf(row.get("repo"));
+            List<?> modes = (List<?>) row.get("allowed_modes");
+            assertTrue(supported.contains(language), "unsupported language in raw source query: " + language);
+            assertFalse(benchmarkRepos.contains(repo.toLowerCase()), "benchmark repo leaked into raw sources: " + repo);
+            assertFalse(repo.toLowerCase().startsWith("ai-code-review-evaluation/"));
+            assertNotNull(modes);
+            assertFalse(modes.isEmpty());
+            if (!"diff_only".equals(row.get("audit_tier"))) {
+                assertTrue(modes.contains("both") || modes.contains("repo_audit"));
+                repoAuditEligible++;
+            }
+            languages++;
+        }
+        assertTrue(languages >= 60);
+        assertTrue(repoAuditEligible >= 20);
     }
 
     @Test
@@ -202,9 +460,7 @@ class JavaAgentTest {
                 tmp.resolve("memory"),
                 tmp.resolve("report"),
                 30,
-                12000,
-                2000,
-                60000, 20000, true, true, 30);
+                12000, true, true, 30);
         AgentRunResult result = testAgent(settings, new FakeLlmClient()).review("owner/repo", 1);
         assertEquals("completed", result.status);
         assertFalse(result.issues.isEmpty());
@@ -260,36 +516,96 @@ class JavaAgentTest {
 
     @Test
     void reviewQualityGateFiltersWeakFindings() {
-        Settings settings = new Settings(
-                "https://token-plan-cn.xiaomimimo.com/v1",
-                "",
-                "mimo-v2.5-pro",
-                "",
-                true,
-                tmp.resolve("quality-traces"),
-                tmp.resolve("quality-memory"),
-                tmp.resolve("quality-report"),
-                30,
-                12000,
-                2000,
-                60000, 20000, true, true, 30);
-        AgentRunResult result = testAgent(settings, (messages, tools, temperature) -> Map.of("choices", List.of(Map.of("message", Map.of(
-                "role", "assistant",
-                "content", """
-                        {
-                          "summary": "quality gate test",
-                          "issues": [
-                            {"severity":"low","category":"style","file":"src/example.py","line":99,"body":"weak uncertain style note","confidence":0.3},
-                            {"severity":"high","category":"logic","file":"src/example.py","line":99,"body":"real issue but wrong inline line","evidence":"+password = request.args.get('password')","impact":"credential leakage","confidence":0.9},
-                            {"severity":"high","category":"security","file":"src/not_changed.py","line":1,"body":"not in diff","confidence":0.9}
-                          ],
-                          "shouldComment": true
-                        }
-                        """
-        ))))).review("owner/repo", 1);
+        ReviewResult input = ReviewResultParser.parse("""
+                {
+                  "summary": "quality gate test",
+                  "issues": [
+                    {"severity":"low","category":"style","file":"src/example.py","line":99,"body":"weak uncertain style note","confidence":0.3},
+                    {"severity":"high","category":"logic","file":"src/example.py","line":99,"body":"real issue but wrong inline line","evidence":"+password = request.args.get('password')","impact":"credential leakage","confidence":0.9},
+                    {"severity":"high","category":"security","file":"src/not_changed.py","line":1,"body":"not in diff","confidence":0.9}
+                  ],
+                  "shouldComment": true
+                }
+                """);
+        ReviewResult result = EvidenceValidationNode.validateDiff(input, fixtureTriage(), Map.of(), new TraceRecorder(tmp.resolve("quality-traces")));
         assertEquals(1, result.issues.size());
         assertEquals("bug", result.issues.getFirst().category);
+        assertEquals(1, result.issues.getFirst().line);
+        assertTrue(result.issues.getFirst().candidateScore >= 0.38);
+    }
+
+    @Test
+    void evidenceValidationScoresButDoesNotDropHunkOnlyFindings() {
+        TraceRecorder trace = new TraceRecorder(tmp.resolve("evidence-traces"));
+        ReviewResult input = new ReviewResult();
+        ReviewIssue hallucinated = new ReviewIssue();
+        hallucinated.severity = Severity.high;
+        hallucinated.category = "bug";
+        hallucinated.file = "src/example.py";
+        hallucinated.line = 3;
+        hallucinated.body = "This changed code may break authentication.";
+        hallucinated.impact = "Users may be unable to sign in.";
+        hallucinated.confidence = 0.95;
+        input.issues = List.of(hallucinated);
+        input.shouldComment = true;
+
+        ReviewResult result = EvidenceValidationNode.validateDiff(input, fixtureTriage(), Map.of(), trace);
+        assertEquals(1, result.issues.size());
         assertNull(result.issues.getFirst().line);
+        assertTrue(result.issues.getFirst().candidateScore > 0.0);
+    }
+
+    @Test
+    void evidenceValidationRepairsLineFromExactEvidence() {
+        TraceRecorder trace = new TraceRecorder(tmp.resolve("line-repair-traces"));
+        ReviewResult input = new ReviewResult();
+        ReviewIssue issue = new ReviewIssue();
+        issue.severity = Severity.high;
+        issue.category = "logic";
+        issue.file = "src/example.py";
+        issue.line = 99;
+        issue.body = "Password is read from the URL query string.";
+        issue.evidence = "+password = request.args.get('password')";
+        issue.impact = "Credentials can leak through logs and browser history.";
+        issue.confidence = 0.9;
+        input.issues = List.of(issue);
+        input.shouldComment = true;
+
+        ReviewResult result = EvidenceValidationNode.validateDiff(input, fixtureTriage(), Map.of(), trace);
+        assertEquals(1, result.issues.size());
+        assertEquals(1, result.issues.getFirst().line);
+        assertEquals("bug", result.issues.getFirst().category);
+    }
+
+    @Test
+    void evidenceValidationDeduplicatesSemanticDuplicates() {
+        TraceRecorder trace = new TraceRecorder(tmp.resolve("dedupe-traces"));
+        ReviewIssue first = new ReviewIssue();
+        first.severity = Severity.high;
+        first.category = "security";
+        first.file = "src/example.py";
+        first.line = 1;
+        first.body = "Password is read from query parameters.";
+        first.evidence = "+password = request.args.get('password')";
+        first.impact = "Credentials can leak through logs and browser history.";
+        first.confidence = 0.9;
+
+        ReviewIssue second = new ReviewIssue();
+        second.severity = Severity.medium;
+        second.category = "security";
+        second.file = "src/example.py";
+        second.line = 1;
+        second.body = "Password is read from query params and may be logged.";
+        second.evidence = "+password = request.args.get('password')";
+        second.impact = "Credentials can leak through request logs.";
+        second.confidence = 0.85;
+
+        ReviewResult input = new ReviewResult();
+        input.issues = List.of(first, second);
+        input.shouldComment = true;
+
+        ReviewResult result = EvidenceValidationNode.validateDiff(input, fixtureTriage(), Map.of(), trace);
+        assertEquals(1, result.issues.size());
     }
 
     @Test
@@ -304,9 +620,7 @@ class JavaAgentTest {
                 tmp.resolve("fp-memory"),
                 tmp.resolve("fp-report"),
                 30,
-                12000,
-                2000,
-                60000, 20000, true, true, 30);
+                12000, true, true, 30);
         MemoryTools memory = new MemoryTools(new MemoryStore(settings.memoryDir()));
         memory.memoryGetAll(Map.of());
         memory.memoryAddFalsePositive(Map.of(
@@ -341,9 +655,7 @@ class JavaAgentTest {
                 tmp.resolve("fix-memory"),
                 tmp.resolve("fix-report"),
                 30,
-                12000,
-                2000,
-                60000, 20000, true, true, 30);
+                12000, true, true, 30);
         AgentRunResult result = testAgent(settings, (messages, tools, temperature) -> Map.of("choices", List.of(Map.of("message", Map.of(
                 "role", "assistant",
                 "content", """
@@ -363,6 +675,79 @@ class JavaAgentTest {
     }
 
     @Test
+    void verifierDropsUnsupportedCandidateAndKeepsStrongFinding() {
+        Settings settings = new Settings(
+                "https://token-plan-cn.xiaomimimo.com/v1",
+                "",
+                "mimo-v2.5-pro",
+                "",
+                true,
+                tmp.resolve("verifier-traces"),
+                tmp.resolve("verifier-memory"),
+                tmp.resolve("verifier-report"),
+                30,
+                12000, true, true, 30);
+        AgentRunResult result = testAgent(settings, (messages, tools, temperature) -> {
+            String last = messages.get(messages.size() - 1).content == null ? "" : messages.get(messages.size() - 1).content;
+            if (last.contains("Verify whether the candidate")) {
+                String verdict = last.contains("unsupported issue") ? "DROP" : "KEEP";
+                return assistantJson("{\"verdict\":\"" + verdict + "\",\"confidence\":0.95,\"corrected_line\":null,\"reason\":\"fixture verifier\"}");
+            }
+            if (last.contains("Generate the final code review report")) {
+                return assistantJson("{\"title\":\"Code Review Report: owner/repo\",\"executive_summary\":\"done\"}");
+            }
+            return assistantJson("""
+                    {
+                      "summary": "verifier test",
+                      "issues": [
+                        {"severity":"high","category":"bug","file":"src/example.py","line":1,"body":"Password is read from query parameters.","evidence":"+password = request.args.get('password')","impact":"Credentials can leak through URLs and logs.","confidence":0.9},
+                        {"severity":"high","category":"bug","file":"src/example.py","line":1,"body":"unsupported issue","impact":"This is speculative.","confidence":0.9}
+                      ],
+                      "shouldComment": true
+                    }
+                    """);
+        }).review("owner/repo", 1);
+        assertEquals(1, result.issues.size());
+        assertTrue(result.issues.getFirst().body.contains("Password"));
+        assertNotEquals("DROP", result.issues.getFirst().validationVerdict);
+    }
+
+    @Test
+    void zeroIssueRecoveryRunsWhenRiskProbesExist() {
+        Settings settings = new Settings(
+                "https://token-plan-cn.xiaomimimo.com/v1",
+                "",
+                "mimo-v2.5-pro",
+                "",
+                true,
+                tmp.resolve("recovery-traces"),
+                tmp.resolve("recovery-memory"),
+                tmp.resolve("recovery-report"),
+                30,
+                12000, true, true, 30).withVerifierEnabled(false);
+        AgentRunResult result = testAgent(settings, (messages, tools, temperature) -> {
+            String last = messages.get(messages.size() - 1).content == null ? "" : messages.get(messages.size() - 1).content;
+            if (last.contains("targeted recovery pass")) {
+                return assistantJson("""
+                        {
+                          "summary": "recovered",
+                          "issues": [
+                            {"severity":"high","category":"bug","file":"src/example.py","line":1,"body":"Password is read from query parameters.","evidence":"+password = request.args.get('password')","impact":"Credentials can leak through URLs and logs.","confidence":0.9}
+                          ],
+                          "shouldComment": true
+                        }
+                        """);
+            }
+            if (last.contains("Generate the final code review report")) {
+                return assistantJson("{\"title\":\"Code Review Report: owner/repo\",\"executive_summary\":\"done\"}");
+            }
+            return assistantJson("{\"summary\":\"none\",\"issues\":[],\"shouldComment\":false}");
+        }).review("owner/repo", 1);
+        assertEquals(1, result.issues.size());
+        assertTrue(result.summary.contains("Recovery pass"));
+    }
+
+    @Test
     void liveMemoryActionsAcceptReviewIssues() {
         Settings settings = new Settings(
                 "https://token-plan-cn.xiaomimimo.com/v1",
@@ -374,9 +759,7 @@ class JavaAgentTest {
                 tmp.resolve("live-memory"),
                 tmp.resolve("live-report"),
                 30,
-                12000,
-                2000,
-                60000, 20000, true, true, 30);
+                12000, true, true, 30);
         AgentRunResult result = testAgent(settings, (messages, tools, temperature) -> Map.of("choices", List.of(Map.of("message", Map.of(
                 "role", "assistant",
                 "content", """
@@ -408,9 +791,7 @@ class JavaAgentTest {
                 tmp.resolve("commit-memory"),
                 tmp.resolve("commit-report"),
                 30,
-                12000,
-                2000,
-                60000, 20000, true, true, 30);
+                12000, true, true, 30);
         AgentRunResult result = testAgent(settings, new FakeLlmClient()).reviewCommits("owner/repo", "base-sha", "head-sha");
         assertEquals("completed", result.status);
         assertTrue(result.tracePath.toFile().exists());
@@ -498,38 +879,78 @@ class JavaAgentTest {
     void repoAuditIndexerBuildsFullCoverageWithoutSampling() throws Exception {
         Path repo = tmp.resolve("fixture-repo");
         Files.createDirectories(repo.resolve("src"));
+        Files.createDirectories(repo.resolve("app/models"));
         Files.createDirectories(repo.resolve("node_modules/pkg"));
         Files.writeString(repo.resolve("src/Auth.java"), "class Auth { String token; }\n", StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("src/Session.swift"), "final class Session { let token: String }\n", StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("src/native.cpp"), "int add(int a, int b) { return a + b; }\n", StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("src/AuthManager.m"), "@implementation AuthManager\n@end\n", StandardCharsets.UTF_8);
+        Files.writeString(repo.resolve("app/models/user.rb"), "class User; end\n", StandardCharsets.UTF_8);
         Files.writeString(repo.resolve("README.md"), "# docs\n", StandardCharsets.UTF_8);
         Files.writeString(repo.resolve("node_modules/pkg/index.js"), "ignored\n", StandardCharsets.UTF_8);
         Settings settings = new Settings("url", "", "model", "", true, tmp.resolve("traces"), tmp.resolve("memory"), tmp.resolve("report"),
-                30, 12000, 2000, 10, 20, false, true, 30);
+                30, 12000, false, true, 30);
 
         RepoAuditIndexer.AuditIndex index = new RepoAuditIndexer(settings).index(repo);
-        assertEquals(2, index.files().size());
+        assertEquals(6, index.files().size());
         assertTrue(index.files().stream().anyMatch(file -> file.path().equals("src/Auth.java")));
+        assertTrue(index.files().stream().anyMatch(file -> file.path().equals("src/Session.swift") && file.language().equals("swift")));
+        assertTrue(index.files().stream().anyMatch(file -> file.path().equals("src/native.cpp") && file.language().equals("cpp")));
+        assertTrue(index.files().stream().anyMatch(file -> file.path().equals("src/AuthManager.m") && file.language().equals("objective-c")));
+        assertTrue(index.files().stream().anyMatch(file -> file.path().equals("app/models/user.rb") && file.language().equals("ruby")));
         assertTrue(index.skipped().stream().anyMatch(item -> "vendor_cache".equals(item.get("reason"))));
         assertFalse(index.slices().isEmpty());
         List<List<RepoAuditIndexer.AuditSlice>> batches = new RepoAuditIndexer(settings).batches(index.slices());
         long covered = batches.stream().flatMap(List::stream).map(RepoAuditIndexer.AuditSlice::path).distinct().count();
-        assertEquals(2, covered);
+        assertEquals(6, covered);
+    }
+
+    @Test
+    void repoAuditIndexerDoesNotApplyFileSizeOrSliceLimits() throws Exception {
+        Path repo = tmp.resolve("large-repo");
+        Files.createDirectories(repo.resolve("src"));
+        String largeBody = "class Large {\n" + "  String value = \"x\";\n".repeat(60_000) + "}\n";
+        Files.writeString(repo.resolve("src/Large.java"), largeBody, StandardCharsets.UTF_8);
+        Settings settings = new Settings("url", "", "model", "", true, tmp.resolve("traces"), tmp.resolve("memory"), tmp.resolve("report"),
+                30, 12000, false, true, 30);
+
+        RepoAuditIndexer.AuditIndex index = new RepoAuditIndexer(settings).index(repo);
+        assertTrue(index.files().stream().anyMatch(file -> file.path().equals("src/Large.java")));
+        assertFalse(index.skipped().stream().anyMatch(item -> "too_large".equals(item.get("reason"))));
+        assertEquals(1, index.slices().stream().filter(slice -> slice.path().equals("src/Large.java")).count());
+        assertTrue(index.slices().stream().anyMatch(slice -> slice.path().equals("src/Large.java")
+                && slice.content().length() == largeBody.length()));
     }
 
     @Test
     void settingsLoadExplicitEnvFile() throws Exception {
         Path env = tmp.resolve(".env");
-        Files.writeString(env, "OPENAI_BASE_URL=https://example.test/v1\nOPENAI_API_KEY=secret\nOPENAI_MODEL=model-x\nCR_AGENT_DRY_RUN=false\nCR_AGENT_REPORT_DIR=custom-report\nCR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD=1234\nCR_AGENT_REPO_AUDIT_BATCH_TOKEN_BUDGET=4567\nCR_AGENT_REPO_AUDIT_MAX_FILE_CHARS=8910\nCR_AGENT_REPO_AUDIT_RUN_CHECKS=false\nCR_AGENT_LSP_ENABLED=false\nCR_AGENT_LSP_TIMEOUT_SECONDS=7\n", StandardCharsets.UTF_8);
+        Files.writeString(env, "OPENAI_BASE_URL=https://example.test/v1\nOPENAI_API_KEY=secret\nOPENAI_MODEL=model-x\nCR_AGENT_DRY_RUN=false\nCR_AGENT_REPORT_DIR=custom-report\nCR_AGENT_REPO_AUDIT_RUN_CHECKS=false\nCR_AGENT_LSP_ENABLED=false\nCR_AGENT_LSP_TIMEOUT_SECONDS=7\nCR_AGENT_VERIFIER_ENABLED=false\nCR_AGENT_VERIFIER_MAX_CANDIDATES=3\nCR_AGENT_REVIEW_MAX_COMMENTS=4\nCR_AGENT_REVIEW_PUBLISH_THRESHOLD=0.51\nCR_AGENT_ZERO_ISSUE_RECOVERY=false\nCR_AGENT_LANGUAGE_SKILLS_ENABLED=false\nCR_AGENT_LANGUAGE_SKILL_MAX_SELECTED=2\nCR_AGENT_RECOVERY_MAX_TOOL_ROUNDS=9\nCR_AGENT_VERIFIER_MAX_TOOL_ROUNDS=5\nCR_AGENT_REPO_BATCH_MAX_TOOL_ROUNDS=11\nCR_AGENT_LLM_TRIAGE_ADVICE=false\nCR_AGENT_LLM_CONTEXT_SCOUT=false\nCR_AGENT_LLM_RISK_REFINEMENT=false\nCR_AGENT_LLM_TEST_REASONING=false\nCR_AGENT_LLM_ACT_PLANNING=true\nCR_AGENT_CONTEXT_RRF_K=77\nCR_AGENT_CONTEXT_MAX_ITEMS=12\n", StandardCharsets.UTF_8);
         Settings settings = Settings.load(env);
         assertEquals("https://example.test/v1", settings.openaiBaseUrl());
         assertEquals("secret", settings.openaiApiKey());
         assertEquals("model-x", settings.openaiModel());
         assertTrue(settings.reportDir().endsWith("custom-report"));
-        assertEquals(1234, settings.humanReviewChangedLinesThreshold());
-        assertEquals(4567, settings.repoAuditBatchTokenBudget());
-        assertEquals(8910, settings.repoAuditMaxFileChars());
         assertFalse(settings.repoAuditRunChecks());
         assertFalse(settings.lspEnabled());
         assertEquals(7, settings.lspTimeoutSeconds());
+        assertFalse(settings.verifierEnabled());
+        assertEquals(3, settings.verifierMaxCandidates());
+        assertEquals(4, settings.reviewMaxComments());
+        assertEquals(0.51, settings.reviewPublishThreshold(), 0.0001);
+        assertFalse(settings.zeroIssueRecovery());
+        assertFalse(settings.languageSkillsEnabled());
+        assertEquals(2, settings.languageSkillMaxSelected());
+        assertEquals(9, settings.recoveryMaxToolRounds());
+        assertEquals(5, settings.verifierMaxToolRounds());
+        assertEquals(11, settings.repoBatchMaxToolRounds());
+        assertFalse(settings.llmTriageAdvice());
+        assertFalse(settings.llmContextScout());
+        assertFalse(settings.llmRiskRefinement());
+        assertFalse(settings.llmTestReasoning());
+        assertTrue(settings.llmActPlanning());
+        assertEquals(77, settings.contextRrfK());
+        assertEquals(12, settings.contextMaxItems());
         assertTrue(settings.hasLlmCredentials());
         assertFalse(settings.dryRun());
     }
@@ -555,44 +976,119 @@ class JavaAgentTest {
                 ((Map<?, ?>) tools.inferTestPath(Map.of("source_path", "src/UserService.cs", "framework", "xunit"))).get("test_path"));
         assertEquals("Tests/UserServiceTests.swift",
                 ((Map<?, ?>) tools.inferTestPath(Map.of("source_path", "Sources/App/UserService.swift", "framework", "xctest"))).get("test_path"));
+        assertEquals("tests/parser_test.cpp",
+                ((Map<?, ?>) tools.inferTestPath(Map.of("source_path", "src/parser.cpp", "framework", "googletest"))).get("test_path"));
+        assertEquals("Tests/AuthManagerTests.m",
+                ((Map<?, ?>) tools.inferTestPath(Map.of("source_path", "Sources/AuthManager.m", "framework", "ocmock"))).get("test_path"));
+        assertEquals("Tests/AuthManagerTests.m",
+                ((Map<?, ?>) tools.inferTestPath(Map.of("source_path", "Sources/AuthManager.m", "framework", "xctest"))).get("test_path"));
     }
 
     @Test
-    void exportsSftAndDpoDatasets() throws Exception {
-        Path traces = tmp.resolve("traces");
-        Settings good = new Settings("url", "", "model", "", true, traces, tmp.resolve("memory"), tmp.resolve("report"), 30, 12000, 2000, 60000, 20000, true, true, 30);
-        testAgent(good, new FakeLlmClient()).review("owner/repo", 1);
-
-        Settings bad = new Settings("url", "", "model", "", true, traces, tmp.resolve("memory2"), tmp.resolve("report2"), 0, 12000, 2000, 60000, 20000, true, true, 30);
-        testAgent(bad, new FakeLlmClient()).review("owner/repo", 2);
-
-        TraceDatasetExporter exporter = new TraceDatasetExporter();
-        Path sft = tmp.resolve("datasets/SFT/sft.jsonl");
-        Path dpo = tmp.resolve("datasets/DPO/dpo.jsonl");
-        assertEquals(1, exporter.exportSft(traces, sft));
-        assertEquals(1, exporter.exportDpo(traces, dpo));
-        assertTrue(Files.readString(sft).contains("\"messages\""));
-        assertTrue(Files.readString(dpo).contains("\"chosen\""));
+    void lspPreflightSupportsMobileNativeAndRubyServers() {
+        List<String> languages = com.cragent.agent.LspAnalyzer.supportedServers().stream()
+                .map(com.cragent.agent.LspAnalyzer.ServerSpec::language)
+                .toList();
+        assertTrue(languages.contains("kotlin"));
+        assertTrue(languages.contains("swift"));
+        assertTrue(languages.contains("cpp"));
+        assertTrue(languages.contains("ruby"));
+        assertTrue(languages.contains("csharp"));
+        assertTrue(languages.contains("php"));
+        assertTrue(languages.contains("yaml"));
+        assertTrue(languages.contains("json"));
+        assertTrue(languages.contains("dockerfile"));
     }
 
     @Test
-    void exporterAcceptsClaudeStyleTrace() throws Exception {
-        Path traces = tmp.resolve("claude");
+    void lspToolsExposeCodeReviewEvidenceTools() {
+        TraceRecorder trace = new TraceRecorder(tmp.resolve("traces"));
+        ToolRouter router = new ToolRouter(true, trace, 12000);
+        Settings settings = new Settings("url", "", "model", "", true, tmp.resolve("traces"), tmp.resolve("memory"), tmp.resolve("report"),
+                30, 12000, true, true, 30);
+        new com.cragent.tools.LspTools(settings).register(router);
+        List<String> names = router.schemas().stream().map(schema -> String.valueOf(((Map<?, ?>) schema.get("function")).get("name"))).toList();
+        assertTrue(names.contains("lsp_capabilities"));
+        assertTrue(names.contains("lsp_symbol_at_position"));
+        assertTrue(names.contains("lsp_changed_symbols"));
+        assertTrue(names.contains("lsp_call_graph"));
+        assertTrue(names.contains("lsp_related_tests_by_symbol"));
+        assertTrue(names.contains("lsp_evidence_bundle"));
+    }
+
+    @Test
+    void languageSkillCatalogParsesDescriptors() {
+        SkillLoader loader = new SkillLoader();
+        List<SkillDescriptor> catalog = loader.languageSkillCatalog();
+        assertEquals(13, catalog.size());
+        assertTrue(catalog.stream().anyMatch(skill -> skill.name().equals("code-review-lang-java-jvm")
+                && skill.languages().contains("java")
+                && skill.filePatterns().contains("*.java")
+                && skill.modes().contains("diff")));
+        assertTrue(catalog.stream().anyMatch(skill -> skill.name().equals("code-review-lang-c-cpp")
+                && skill.languages().contains("cpp")));
+        String selected = loader.loadSelectedSkills(List.of("code-review-lang-ruby-rails", "not-a-language-skill"));
+        assertTrue(selected.contains("Ruby / Rails CR Skill"));
+        assertFalse(selected.contains("Java / Spring / JVM CR Skill"));
+    }
+
+    @Test
+    void languageSkillRouterFallsBackByLanguageAndPath() {
+        Settings settings = new Settings("url", "", "model", "", true, tmp.resolve("traces"), tmp.resolve("memory"), tmp.resolve("report"),
+                30, 12000, true, true, 30);
+        LlmClient malformed = (messages, tools, temperature) -> Map.of("choices", List.of(Map.of("message", Map.of(
+                "role", "assistant",
+                "content", "not-json"
+        ))));
+        LanguageSkillRouter router = new LanguageSkillRouter(settings, malformed, new TraceRecorder(tmp.resolve("traces")));
+        Map<String, Object> triage = Map.of("changed_files", List.of(
+                Map.of("filename", "src/main/java/com/acme/AuthService.java", "patch", "+ synchronized void login() {}"),
+                Map.of("filename", "src/components/Login.tsx", "patch", "+ localStorage.setItem('token', token)"),
+                Map.of("filename", ".github/workflows/ci.yml", "patch", "+ permissions: write-all")
+        ));
+        Map<String, Object> analysis = new java.util.LinkedHashMap<>();
+        analysis.put("risk_model", Map.of("risk_types", List.of("security/auth", "dependency/build")));
+        LanguageSkillRouter.Selection selection = router.selectForDiff(triage, analysis);
+        List<String> names = selection.selectedSkills().stream().map(item -> String.valueOf(item.get("name"))).toList();
+        assertTrue(names.contains("code-review-lang-java-jvm"));
+        assertTrue(names.contains("code-review-lang-js-ts-frontend"));
+        assertTrue(names.contains("code-review-lang-config-build"));
+        assertTrue(selection.prompt().contains("Java / Spring / JVM CR Skill"));
+        assertTrue(analysis.containsKey("language_skill_selection"));
+    }
+
+    @Test
+    void exportsAgenticRlEpisodesAndRewardLabels() throws Exception {
+        Path traces = tmp.resolve("rl-trace");
         Files.createDirectories(traces);
-        Path trace = traces.resolve("trace_abc.jsonl");
+        Path trace = traces.resolve("rl.jsonl");
         Files.writeString(trace, String.join("\n",
-                "{\"type\":\"session_start\",\"session_id\":\"abc\",\"pr\":\"owner/repo#1\"}",
-                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Review PR #1\"}}",
-                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Checking.\"},{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"get_pull_request\",\"input\":{\"owner\":\"o\",\"repo\":\"r\",\"pull_number\":1}}],\"stop_reason\":\"tool_use\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}",
-                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool-1\",\"content\":[{\"type\":\"text\",\"text\":\"{}\"}]}]}}",
-                "{\"type\":\"session_end\",\"session_id\":\"abc\",\"stats\":{\"decision\":\"COMMENT\",\"issues_found\":1}}",
+                "{\"event_type\":\"session_start\",\"session_id\":\"rl1\",\"repo\":\"owner/repo\",\"target\":\"commit_range\",\"base\":\"a\",\"head\":\"b\",\"dry_run\":true}",
+                "{\"event_type\":\"llm_request\",\"session_id\":\"rl1\",\"phase\":\"REVIEW\",\"iteration\":1,\"messages\":[{\"role\":\"system\",\"content\":\"review\"},{\"role\":\"user\",\"content\":\"check\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"search_code\",\"description\":\"Search code\",\"parameters\":{\"type\":\"object\"}}}]}",
+                "{\"event_type\":\"llm_response\",\"session_id\":\"rl1\",\"phase\":\"REVIEW\",\"iteration\":1,\"response\":{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"search_code\",\"arguments\":\"{\\\"query\\\":\\\"auth\\\"}\"}}]}}]}}",
+                "{\"event_type\":\"tool_call\",\"session_id\":\"rl1\",\"tool_call\":{\"id\":\"call-1\",\"name\":\"search_code\",\"arguments\":{\"query\":\"auth\"}}}",
+                "{\"event_type\":\"tool_result\",\"session_id\":\"rl1\",\"tool_result\":{\"toolCallId\":\"call-1\",\"name\":\"search_code\",\"ok\":true,\"result\":{\"items\":[\"AuthService\"]},\"truncated\":false}}",
+                "{\"event_type\":\"llm_request\",\"session_id\":\"rl1\",\"phase\":\"REVIEW\",\"iteration\":2,\"messages\":[{\"role\":\"system\",\"content\":\"review\"},{\"role\":\"user\",\"content\":\"check\"},{\"role\":\"assistant\",\"content\":null,\"toolCalls\":[{\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"search_code\",\"arguments\":\"{\\\"query\\\":\\\"auth\\\"}\"}}]},{\"role\":\"tool\",\"content\":\"{}\",\"toolCallId\":\"call-1\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"search_code\",\"description\":\"Search code\",\"parameters\":{\"type\":\"object\"}}}]}",
+                "{\"event_type\":\"llm_response\",\"session_id\":\"rl1\",\"phase\":\"REVIEW\",\"iteration\":2,\"response\":{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"summary\\\":\\\"ok\\\",\\\"issues\\\":[{\\\"body\\\":\\\"real issue\\\"}]}\"}}]}}",
+                "{\"event_type\":\"candidate_publish\",\"session_id\":\"rl1\",\"input\":1,\"after_verification\":1,\"published\":1}",
+                "{\"event_type\":\"session_end\",\"session_id\":\"rl1\",\"status\":\"completed\",\"summary\":\"ok\",\"issues_found\":1}",
                 ""
         ), StandardCharsets.UTF_8);
-        Path out = tmp.resolve("sft.jsonl");
-        assertEquals(1, new TraceDatasetExporter().exportSft(traces, out));
-        String text = Files.readString(out);
-        assertTrue(text.contains("\"tool_calls\""));
-        assertFalse(text.contains("[Tool:"));
+        TraceDatasetExporter exporter = new TraceDatasetExporter();
+        Path episodes = tmp.resolve("datasets/RL/episodes.jsonl");
+        Path rewards = tmp.resolve("datasets/RL/rewards.jsonl");
+        assertEquals(1, exporter.exportRlEpisodes(traces, episodes));
+        assertEquals(1, exporter.exportRewardLabels(traces, rewards));
+        String episodeText = Files.readString(episodes);
+        assertTrue(episodeText.contains("\"schema_version\":\"agentic_rl_episode_v1\""));
+        assertTrue(episodeText.contains("\"task_id\":\"repo=owner/repo|target=commit_range|base=a|head=b\""));
+        assertTrue(episodeText.contains("\"type\":\"tool_call\""));
+        assertTrue(episodeText.contains("\"tool_results\""));
+        assertTrue(episodeText.contains("\"done\":true"));
+        String rewardText = Files.readString(rewards);
+        assertTrue(rewardText.contains("\"schema_version\":\"agentic_rl_reward_v1\""));
+        assertTrue(rewardText.contains("\"terminal_reward\""));
+        assertTrue(rewardText.contains("\"heuristic_trace_v1\""));
     }
 
     private CodeReviewAgent testAgent(Settings settings, LlmClient llm) {
@@ -653,5 +1149,17 @@ class JavaAgentTest {
 
     private List<Map<String, Object>> fixtureFiles() {
         return List.of(Map.of("filename", "src/example.py", "status", "modified", "additions", 1, "deletions", 0, "patch", "+password = request.args.get('password')"));
+    }
+
+    private Map<String, Object> fixtureTriage() {
+        return Map.of(
+                "changed_files", fixtureFiles(),
+                "author", "alice",
+                "should_review", true
+        );
+    }
+
+    private Map<String, Object> assistantJson(String content) {
+        return Map.of("choices", List.of(Map.of("message", Map.of("role", "assistant", "content", content))));
     }
 }

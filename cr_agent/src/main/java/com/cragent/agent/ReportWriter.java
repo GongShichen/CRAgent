@@ -171,6 +171,57 @@ public class ReportWriter {
             out.append("\n");
         }
 
+        Object languageSkills = target.get("language_skill_selection");
+        if (languageSkills instanceof List<?> list && !list.isEmpty()) {
+            out.append("### Language Skills\n\n");
+            out.append("| Skill | Reason | Matched languages | Matched files |\n");
+            out.append("| --- | --- | --- | --- |\n");
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> skill) {
+                    Object name = skill.get("name");
+                    Object reason = skill.get("reason");
+                    row(out,
+                            "`" + markdownEscape(name == null ? "" : String.valueOf(name)) + "`",
+                            markdownEscape(reason == null ? "" : String.valueOf(reason)),
+                            inlineValue(skill.get("matched_languages")),
+                            inlineValue(skill.get("matched_files")));
+                }
+            }
+            out.append("\n");
+        }
+
+        Object contextEngine = target.get("context_engine");
+        if (contextEngine instanceof Map<?, ?> context && !context.isEmpty()) {
+            out.append("### Context Engine\n\n");
+            Object summary = context.get("context_summary");
+            if (summary instanceof Map<?, ?> summaryMap) {
+                out.append("| Field | Value |\n");
+                out.append("| --- | --- |\n");
+                row(out, "Mode", inlineValue(summaryMap.get("mode")));
+                row(out, "Indexed files", inlineValue(summaryMap.get("indexed_files")));
+                row(out, "Candidate items", inlineValue(summaryMap.get("candidate_items")));
+                row(out, "Selected items", inlineValue(summaryMap.get("selected_items")));
+                row(out, "Compressed items", inlineValue(summaryMap.get("compressed_items")));
+                row(out, "Top context types", inlineValue(summaryMap.get("top_context_types")));
+                row(out, "Top retrieval channels", inlineValue(summaryMap.get("top_retrieval_channels")));
+                out.append("\n");
+            }
+            Object ledger = context.get("context_ledger");
+            if (ledger instanceof Map<?, ?> ledgerMap) {
+                out.append("| Ledger | Value |\n");
+                out.append("| --- | --- |\n");
+                row(out, "RRF k", inlineValue(ledgerMap.get("rrf_k")));
+                row(out, "Char budget", inlineValue(ledgerMap.get("char_budget")));
+                row(out, "Max items", inlineValue(ledgerMap.get("max_items")));
+                row(out, "Channel counts", inlineValue(ledgerMap.get("channel_counts")));
+                row(out, "RRF top items", inlineValue(ledgerMap.get("rrf_top_items")));
+                row(out, "Selected chars", inlineValue(ledgerMap.get("selected_chars")));
+                row(out, "Selected item ids", inlineValue(ledgerMap.get("selected_item_ids")));
+                row(out, "Compressed item ids", inlineValue(ledgerMap.get("compressed_item_ids")));
+                out.append("\n");
+            }
+        }
+
         appendDetailsJson(out, "Full Context JSON", compactTarget(target));
     }
 
@@ -330,6 +381,12 @@ public class ReportWriter {
         if (lower.endsWith(".js")) return "javascript";
         if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "typescript";
         if (lower.endsWith(".rs")) return "rust";
+        if (lower.endsWith(".swift")) return "swift";
+        if (lower.endsWith(".rb") || lower.endsWith(".gemspec")) return "ruby";
+        if (lower.endsWith(".c") || lower.endsWith(".h")) return "c";
+        if (lower.endsWith(".cc") || lower.endsWith(".cpp") || lower.endsWith(".cxx")
+                || lower.endsWith(".hh") || lower.endsWith(".hpp") || lower.endsWith(".hxx")) return "cpp";
+        if (lower.endsWith(".m") || lower.endsWith(".mm")) return "objective-c";
         if (lower.endsWith(".json")) return "json";
         if (lower.endsWith(".xml")) return "xml";
         if (lower.endsWith(".yml") || lower.endsWith(".yaml")) return "yaml";

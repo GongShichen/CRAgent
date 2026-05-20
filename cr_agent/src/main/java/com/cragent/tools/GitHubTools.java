@@ -426,6 +426,10 @@ public class GitHubTools {
         String composerJson = readOptional(repoArgs, "composer.json", branch, checked);
         String gemfile = readOptional(repoArgs, "Gemfile", branch, checked);
         String packageSwift = readOptional(repoArgs, "Package.swift", branch, checked);
+        String podfile = readOptional(repoArgs, "Podfile", branch, checked);
+        String cmake = readOptional(repoArgs, "CMakeLists.txt", branch, checked);
+        String makefile = readOptional(repoArgs, "Makefile", branch, checked);
+        String compileCommands = readOptional(repoArgs, "compile_commands.json", branch, checked);
         String csproj = readOptional(repoArgs, "src/App/App.csproj", branch, checked)
                 + "\n" + readOptional(repoArgs, "App.csproj", branch, checked)
                 + "\n" + readOptional(repoArgs, "Directory.Packages.props", branch, checked);
@@ -546,10 +550,41 @@ public class GitHubTools {
             }
         }
         String swiftConfig = packageSwift.toLowerCase();
-        if (!swiftConfig.isBlank()) {
-            languages.add("swift");
-            frameworks.add(swiftConfig.contains("quick") ? "quick-nimble" : "swift-testing");
-            if (swiftConfig.contains("xctest")) {
+        String iosConfig = (packageSwift + "\n" + podfile).toLowerCase();
+        if (!iosConfig.isBlank()) {
+            if (!packageSwift.isBlank()) {
+                languages.add("swift");
+            }
+            if (!podfile.isBlank()) {
+                languages.add("objective-c");
+            }
+            frameworks.add(swiftConfig.contains("quick") || iosConfig.contains("quick") || iosConfig.contains("nimble") ? "quick-nimble" : "swift-testing");
+            if (swiftConfig.contains("xctest") || iosConfig.contains("xctest")) {
+                frameworks.add("xctest");
+            }
+            if (iosConfig.contains("ocmock")) {
+                frameworks.add("ocmock");
+            }
+        }
+        String nativeConfig = (cmake + "\n" + makefile + "\n" + compileCommands + "\n" + podfile).toLowerCase();
+        if (!nativeConfig.isBlank()) {
+            if (nativeConfig.contains("objc") || nativeConfig.contains("objective-c") || nativeConfig.contains(".m") || nativeConfig.contains(".mm") || !podfile.isBlank()) {
+                languages.add("objective-c");
+            }
+            languages.add(nativeConfig.contains("cxx") || nativeConfig.contains("cpp") || nativeConfig.contains("c++") ? "cpp" : "c");
+            if (nativeConfig.contains("gtest") || nativeConfig.contains("googletest")) {
+                frameworks.add("googletest");
+            }
+            if (nativeConfig.contains("catch2")) {
+                frameworks.add("catch2");
+            }
+            if (nativeConfig.contains("doctest")) {
+                frameworks.add("doctest");
+            }
+            if (nativeConfig.contains("ctest") || !cmake.isBlank()) {
+                frameworks.add("ctest");
+            }
+            if (nativeConfig.contains("xctest")) {
                 frameworks.add("xctest");
             }
         }

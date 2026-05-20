@@ -68,9 +68,15 @@ public class TestGenerationTools {
         } else if (framework.equals("xunit") || framework.equals("nunit") || framework.equals("mstest") || framework.equals("moq")) {
             String filename = source.substring(source.lastIndexOf('/') + 1).replaceFirst("\\.cs$", "");
             testPath = "tests/" + filename + "Tests.cs";
+        } else if ((framework.equals("xctest") || framework.equals("ocmock")) && isObjectiveCSource(source)) {
+            String filename = source.substring(source.lastIndexOf('/') + 1).replaceAll("\\.(m|mm|h)$", "");
+            testPath = "Tests/" + filename + "Tests.m";
         } else if (framework.equals("swift-testing") || framework.equals("xctest") || framework.equals("quick-nimble")) {
             String filename = source.substring(source.lastIndexOf('/') + 1).replaceFirst("\\.swift$", "");
             testPath = "Tests/" + filename + "Tests.swift";
+        } else if (framework.equals("googletest") || framework.equals("catch2") || framework.equals("doctest") || framework.equals("ctest")) {
+            String filename = source.substring(source.lastIndexOf('/') + 1).replaceAll("\\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$", "");
+            testPath = "tests/" + filename + "_test.cpp";
         } else {
             int dot = source.lastIndexOf('.');
             testPath = dot > 0 ? source.substring(0, dot) + ".spec" + source.substring(dot) : source + ".spec";
@@ -99,12 +105,14 @@ public class TestGenerationTools {
                 || lower.endsWith(".toml") || lower.endsWith(".xml") || lower.contains("/test") || lower.startsWith("tests/")
                 || lower.endsWith("test.java") || lower.endsWith("test.kt") || lower.endsWith("_test.go") || lower.endsWith("_test.rs")
                 || lower.endsWith("test.php") || lower.endsWith("_spec.rb") || lower.endsWith("_test.rb") || lower.endsWith("tests.cs") || lower.endsWith("tests.swift")
+                || lower.endsWith("_test.c") || lower.endsWith("_test.cc") || lower.endsWith("_test.cpp") || lower.endsWith("_test.mm") || lower.endsWith("test.m") || lower.endsWith("test.mm")
                 || lower.endsWith(".spec.ts") || lower.endsWith(".spec.tsx") || lower.endsWith(".test.js") || lower.endsWith(".test.ts") || lower.endsWith(".test.tsx")) {
             return false;
         }
         return additions > 20 || patch.contains("def ") || patch.contains("function ") || patch.contains("class ") || patch.contains("=>")
                 || patch.contains("public ") || patch.contains("private ") || patch.contains("protected ") || patch.contains("fn ")
-                || patch.contains("fun ") || patch.contains("func ") || patch.contains("class ") || patch.contains("module ");
+                || patch.contains("fun ") || patch.contains("func ") || patch.contains("class ") || patch.contains("module ")
+                || patch.contains("@interface") || patch.contains("@implementation") || patch.contains("static ") || patch.contains("template <");
     }
 
     private static String renderStub(String source, String framework) {
@@ -302,6 +310,23 @@ public class TestGenerationTools {
                     }
                     """.formatted(source);
         }
+        if ((framework.equals("xctest") || framework.equals("ocmock")) && isObjectiveCSource(source)) {
+            return """
+                    #import <XCTest/XCTest.h>
+
+                    @interface GeneratedCoverageTests : XCTestCase
+                    @end
+
+                    @implementation GeneratedCoverageTests
+
+                    - (void)testCoversNewBehavior {
+                        // TODO: cover %s
+                        XCTAssertTrue(YES);
+                    }
+
+                    @end
+                    """.formatted(source);
+        }
         if (framework.equals("swift-testing") || framework.equals("xctest") || framework.equals("quick-nimble")) {
             return """
                     import XCTest
@@ -314,6 +339,41 @@ public class TestGenerationTools {
                     }
                     """.formatted(source);
         }
+        if (framework.equals("googletest")) {
+            return """
+                    #include <gtest/gtest.h>
+
+                    TEST(GeneratedCoverageTest, CoversNewBehavior) {
+                      // TODO: cover %s
+                      EXPECT_TRUE(true);
+                    }
+                    """.formatted(source);
+        }
+        if (framework.equals("catch2")) {
+            return """
+                    #include <catch2/catch_test_macros.hpp>
+
+                    TEST_CASE("covers new behavior") {
+                      // TODO: cover %s
+                      REQUIRE(true);
+                    }
+                    """.formatted(source);
+        }
+        if (framework.equals("doctest") || framework.equals("ctest")) {
+            return """
+                    #include <doctest/doctest.h>
+
+                    TEST_CASE("covers new behavior") {
+                      // TODO: cover %s
+                      CHECK(true);
+                    }
+                    """.formatted(source);
+        }
         return "def test_generated_coverage_placeholder():\n    # TODO: cover " + source + "\n    assert True\n";
+    }
+
+    private static boolean isObjectiveCSource(String source) {
+        String lower = source.toLowerCase();
+        return lower.endsWith(".m") || lower.endsWith(".mm") || lower.endsWith(".h");
     }
 }

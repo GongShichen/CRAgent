@@ -4,13 +4,18 @@ import com.cragent.agent.CodeReviewAgent;
 import com.cragent.agent.LspAnalyzer;
 import com.cragent.agent.LspServerRegistry;
 import com.cragent.config.Settings;
+import com.cragent.datasets.DatasetBatchRunner;
+import com.cragent.datasets.TraceDatasetExporter;
 import com.cragent.llm.LlmClient;
 import com.cragent.llm.OpenAiCompatibleClient;
 import com.cragent.model.AgentRunResult;
 import com.cragent.model.ReviewIssue;
 import com.cragent.model.ToolResult;
 import com.cragent.tools.GitHubTools;
+import com.cragent.util.ProjectPaths;
 
+import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.Scanner;
 
@@ -24,10 +29,34 @@ public class CrAgentCli {
     }
 
     private static void run(String[] args) throws Exception {
-        if (args.length > 0) {
-            System.out.println("CR Agent 现在只保留 chat 模式；命令行参数会被忽略。直接使用 ./gradlew run 启动。");
-        }
         Settings settings = Settings.load();
+        if (args.length > 0) {
+            switch (args[0]) {
+                case "run-dataset" -> {
+                    int code = new DatasetBatchRunner(settings).run(Arrays.copyOfRange(args, 1, args.length));
+                    if (code != 0) {
+                        throw new IllegalStateException("Dataset run completed with failed tasks.");
+                    }
+                    return;
+                }
+                case "export-rl" -> {
+                    Path input = args.length > 1 ? Path.of(args[1]) : settings.traceDir();
+                    int count = new TraceDatasetExporter().exportRlEpisodes(input, ProjectPaths.defaultRlEpisodesPath());
+                    System.out.println("Exported RL episodes: " + count + " -> " + ProjectPaths.defaultRlEpisodesPath());
+                    return;
+                }
+                case "export-rewards" -> {
+                    Path input = args.length > 1 ? Path.of(args[1]) : settings.traceDir();
+                    int count = new TraceDatasetExporter().exportRewardLabels(input, ProjectPaths.defaultRlRewardsPath());
+                    System.out.println("Exported reward labels: " + count + " -> " + ProjectPaths.defaultRlRewardsPath());
+                    return;
+                }
+                default -> {
+                    usage();
+                    return;
+                }
+            }
+        }
         chat(settings);
     }
 
@@ -268,6 +297,9 @@ public class CrAgentCli {
         System.out.println("""
                 Usage:
                   ./gradlew run
+                  ./gradlew run --args="run-dataset --tasks ../datasets/raw/tasks.jsonl --limit 1000 --resume"
+                  ./gradlew run --args="export-rl [trace_dir_or_file]"
+                  ./gradlew run --args="export-rewards [trace_dir_or_file]"
                 """);
     }
 }

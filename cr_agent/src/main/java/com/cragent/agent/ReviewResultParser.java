@@ -38,8 +38,19 @@ public final class ReviewResultParser {
                     issue.impact = item.path("impact").isMissingNode() || item.path("impact").isNull() ? null : item.path("impact").asText();
                     issue.suggestion = item.path("suggestion").isMissingNode() || item.path("suggestion").isNull() ? null : item.path("suggestion").asText();
                     issue.autoFixable = item.path("autoFixable").asBoolean(item.path("auto_fixable").asBoolean(false));
-                    issue.fixCode = item.path("fixCode").asText(item.path("fix_code").isNull() ? null : item.path("fix_code").asText(null));
+                    issue.fixCode = nullableNodeText(item, "fixCode");
+                    if (issue.fixCode == null) {
+                        issue.fixCode = nullableNodeText(item, "fix_code");
+                    }
                     issue.confidence = item.path("confidence").asDouble(0.5);
+                    issue.candidateScore = item.path("candidateScore").asDouble(item.path("candidate_score").asDouble(0.0));
+                    issue.validationVerdict = item.path("validationVerdict").asText(item.path("validation_verdict").asText("UNVERIFIED"));
+                    issue.validationReason = nullableNodeText(item, "validationReason");
+                    if (issue.validationReason == null) {
+                        issue.validationReason = nullableNodeText(item, "validation_reason");
+                    }
+                    issue.correctedLine = item.path("correctedLine").isNumber() ? item.path("correctedLine").asInt()
+                            : (item.path("corrected_line").isNumber() ? item.path("corrected_line").asInt() : null);
                     result.issues.add(issue);
                 }
             }
@@ -104,6 +115,16 @@ public final class ReviewResultParser {
                 issue.fixCode = nullableStringField(raw, "fix_code");
             }
             issue.confidence = doubleField(raw, "confidence", 0.5);
+            issue.candidateScore = doubleField(raw, "candidateScore", doubleField(raw, "candidate_score", 0.0));
+            issue.validationVerdict = stringField(raw, "validationVerdict", stringField(raw, "validation_verdict", "UNVERIFIED"));
+            issue.validationReason = nullableStringField(raw, "validationReason");
+            if (issue.validationReason == null) {
+                issue.validationReason = nullableStringField(raw, "validation_reason");
+            }
+            issue.correctedLine = integerField(raw, "correctedLine");
+            if (issue.correctedLine == null) {
+                issue.correctedLine = integerField(raw, "corrected_line");
+            }
             if (issue.file != null && !issue.body.isBlank()) {
                 result.issues.add(issue);
             }
@@ -128,18 +149,42 @@ public final class ReviewResultParser {
     }
 
     private static java.util.List<String> splitIssueObjects(String issues) {
-        String trimmed = issues.trim();
-        if (trimmed.startsWith("{")) {
-            trimmed = trimmed.substring(1);
+        java.util.List<String> out = new java.util.ArrayList<>();
+        int depth = 0;
+        int start = -1;
+        boolean inString = false;
+        boolean escaped = false;
+        for (int i = 0; i < issues.length(); i++) {
+            char c = issues.charAt(i);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\' && inString) {
+                escaped = true;
+                continue;
+            }
+            if (c == '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) {
+                continue;
+            }
+            if (c == '{') {
+                if (depth == 0) {
+                    start = i;
+                }
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0 && start >= 0) {
+                    out.add(issues.substring(start, i + 1).trim());
+                    start = -1;
+                }
+            }
         }
-        if (trimmed.endsWith("}")) {
-            trimmed = trimmed.substring(0, trimmed.length() - 1);
-        }
-        return java.util.Arrays.stream(trimmed.split("(?m)^\\s*}\\s*,\\s*\\R\\s*\\{\\s*$"))
-                .map(String::trim)
-                .filter(item -> !item.isBlank())
-                .map(item -> "{" + item + "}")
-                .toList();
+        return out;
     }
 
     private static String nullableStringField(String text, String key) {
@@ -168,7 +213,7 @@ public final class ReviewResultParser {
         }
         int start = pos + 1;
         java.util.regex.Matcher nextField = java.util.regex.Pattern
-                .compile("\"\\s*,\\s*\\R\\s*\"(?:summary|severity|category|file|line|body|description|evidence|impact|suggestion|autoFixable|auto_fixable|fixCode|fix_code|confidence|shouldComment|should_comment|shouldCreateFixPr|should_create_fix_pr|shouldUpdateMemory|should_update_memory|issues)\"\\s*:")
+                .compile("\"\\s*,\\s*(?:\\R\\s*)?\"(?:summary|severity|category|file|line|body|description|evidence|impact|suggestion|autoFixable|auto_fixable|fixCode|fix_code|confidence|candidateScore|candidate_score|validationVerdict|validation_verdict|validationReason|validation_reason|correctedLine|corrected_line|shouldComment|should_comment|shouldCreateFixPr|should_create_fix_pr|shouldUpdateMemory|should_update_memory|issues)\"\\s*:")
                 .matcher(text);
         if (nextField.find(start)) {
             return unescape(text.substring(start, nextField.start()));
@@ -186,6 +231,11 @@ public final class ReviewResultParser {
             return null;
         }
         return Integer.parseInt(matcher.group(1));
+    }
+
+    private static String nullableNodeText(JsonNode node, String key) {
+        JsonNode value = node.path(key);
+        return value.isMissingNode() || value.isNull() ? null : value.asText();
     }
 
     private static double doubleField(String text, String key, double fallback) {

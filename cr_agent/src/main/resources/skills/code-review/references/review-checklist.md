@@ -183,6 +183,8 @@
 - [ ] background job 幂等，可重试失败不会重复副作用
 - [ ] secret/credential 不进入日志或异常响应
 - [ ] 测试使用 RSpec/Minitest，request spec 覆盖鉴权、权限和错误路径
+- [ ] migration 可回滚，数据迁移分批执行，长事务/锁表风险可控
+- [ ] rescue 不吞掉关键异常，事务边界内外的副作用不会产生不一致状态
 
 ### Swift / iOS
 - [ ] UI 更新发生在 main actor/thread，异步任务取消与生命周期绑定
@@ -191,3 +193,23 @@
 - [ ] URLSession 错误、状态码和 decoding error 有明确处理
 - [ ] delegate/closure 捕获避免 retain cycle，长生命周期对象使用 weak/unowned 有理由
 - [ ] 测试使用 XCTest/Swift Testing，异步测试等待和取消路径覆盖完整
+- [ ] Codable schema 变更兼容旧数据，日期/时区/locale 处理明确
+- [ ] Combine/Task/NotificationCenter observer 生命周期释放明确，避免重复订阅或泄漏
+- [ ] App privacy、permission、background task、deep link 和 universal link 路径有鉴权与状态校验
+
+### C / C++
+- [ ] buffer 长度、索引、整数溢出和 signed/unsigned 转换有边界检查
+- [ ] `malloc/new` 与 `free/delete` 所有权清晰，错误路径无泄漏、double-free 或 use-after-free
+- [ ] RAII、smart pointer、move/copy 语义符合对象生命周期，异常路径资源释放正确
+- [ ] string/memory API 避免不安全 `strcpy/sprintf/memcpy` 长度错误，跨平台字符编码明确
+- [ ] 多线程访问使用明确同步，atomic memory order、锁粒度和死锁风险被验证
+- [ ] CMake/Make/compile_commands 变更不会破坏目标、include path、ABI 或 sanitizer/static-analysis 覆盖
+- [ ] 测试使用 GoogleTest/Catch2/doctest/CTest，覆盖边界值、错误路径和 sanitizer 可发现的问题
+
+### Objective-C / Cocoa
+- [ ] ARC/MRC ownership 语义正确，`weak/strong/copy/assign` 属性选择避免 retain cycle 和 dangling pointer
+- [ ] block/delegate/notification/KVO 生命周期释放明确，异步回调不会访问释放对象
+- [ ] UI、CoreData 和 UIKit/AppKit 对象在正确线程/queue 使用
+- [ ] `NSError **`、nil message、nullable/nonnull 注解和 Objective-C/C++ bridge 错误路径完整
+- [ ] Keychain、pasteboard、UserDefaults、URL scheme/deep link 等敏感路径不泄露 token 或绕过鉴权
+- [ ] 测试使用 XCTest/OCMock，覆盖 delegate、notification、async callback 和错误路径

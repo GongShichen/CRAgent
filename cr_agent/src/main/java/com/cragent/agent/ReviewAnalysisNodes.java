@@ -50,17 +50,31 @@ public final class ReviewAnalysisNodes {
                 addUnique(riskTypes, "data/migration");
                 addUnique(reviewFocus, "schema compatibility, transaction safety, rollback behavior");
             }
-            if (containsAny(patch, "thread", "async", "await", "lock", "mutex", "synchronized", "goroutine", "channel", "executor")) {
+            if (containsAny(patch, "thread", "async", "await", "lock", "mutex", "synchronized", "goroutine", "channel", "executor",
+                    "dispatchqueue", "mainactor", "actor ", "weak self", "atomic", "pthread")) {
                 addUnique(riskTypes, "concurrency/async");
-                addUnique(reviewFocus, "race conditions, cancellation, timeout, resource cleanup");
+                addUnique(reviewFocus, "race conditions, cancellation, timeout, UI-thread affinity, resource cleanup");
             }
             if (containsAny(lower, "api", "controller", "route", "handler", "graphql", "proto", "openapi") || containsAny(patch, "public ", "endpoint", "route", "request", "response")) {
                 addUnique(riskTypes, "api/contract");
                 addUnique(reviewFocus, "backward compatibility, validation, error semantics");
             }
-            if (containsAny(lower, "package.json", "pom.xml", "build.gradle", "cargo.toml", "requirements.txt", "go.mod", "composer.json", "gemfile")) {
+            if (containsAny(lower, "package.json", "pom.xml", "build.gradle", "cargo.toml", "requirements.txt", "go.mod", "composer.json", "gemfile",
+                    "package.swift", "podfile", "cmakelists.txt", "makefile", "compile_commands.json")) {
                 addUnique(riskTypes, "dependency/build");
                 addUnique(reviewFocus, "supply-chain risk, version compatibility, build/test behavior");
+            }
+            if (containsAny(patch, "malloc", "free(", "delete ", "new ", "memcpy", "memmove", "strcpy", "strncpy", "sprintf", "reinterpret_cast", "unsafe", "pointer")) {
+                addUnique(riskTypes, "native-memory-safety");
+                addUnique(reviewFocus, "bounds, ownership, lifetime, pointer nullability, and unsafe API use");
+            }
+            if (containsAny(patch, "userdefaults", "keychain", "nsuserdefaults", "credential", "accessibility", "biometric", "certificate", "secitem")) {
+                addUnique(riskTypes, "mobile-security");
+                addUnique(reviewFocus, "secure storage, keychain accessibility, credential lifecycle, privacy-sensitive logging");
+            }
+            if (containsAny(patch, "activerecord", "params.require", "permit(", "before_action", "skip_before_action", "sql", "where(")) {
+                addUnique(riskTypes, "framework-security");
+                addUnique(reviewFocus, "authorization coverage, mass assignment, SQL construction, and request validation");
             }
         }
         if (Boolean.TRUE.equals(triage.get("docs_only"))) {

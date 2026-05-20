@@ -20,12 +20,12 @@ public final class ProjectPaths {
         return local;
     }
 
-    public static Path defaultSftPath() {
-        return repoRoot().resolve("datasets/SFT/sft.jsonl");
+    public static Path defaultRlEpisodesPath() {
+        return repoRoot().resolve("datasets/RL/episodes.jsonl");
     }
 
-    public static Path defaultDpoPath() {
-        return repoRoot().resolve("datasets/DPO/dpo.jsonl");
+    public static Path defaultRlRewardsPath() {
+        return repoRoot().resolve("datasets/RL/rewards.jsonl");
     }
 
     public static Path defaultReportDir() {

@@ -106,6 +106,8 @@ Frontend: React/Vue/Angular component exports, hooks, handlers, route loaders
 | Ruby | `app/models/user.rb` | `spec/models/user_spec.rb` |
 | C# | `src/UserService.cs` | `tests/UserServiceTests.cs` |
 | Swift | `Sources/App/UserService.swift` | `Tests/UserServiceTests.swift` |
+| C/C++ | `src/parser.cpp` | `tests/parser_test.cpp` |
+| Objective-C | `Sources/AuthManager.m` | `Tests/AuthManagerTests.m` |
 
 ### 支持的测试框架识别
 
@@ -122,6 +124,8 @@ Frontend: React/Vue/Angular component exports, hooks, handlers, route loaders
 | Ruby | `Gemfile` | RSpec, Minitest, Rails Test |
 | C#/.NET | `.csproj`, `Directory.Packages.props` | xUnit, NUnit, MSTest, Moq |
 | Swift | `Package.swift` | XCTest, Swift Testing, Quick/Nimble |
+| C/C++ | `CMakeLists.txt`, `Makefile`, `compile_commands.json` | GoogleTest, Catch2, doctest, CTest |
+| Objective-C | `Podfile`, `.xcodeproj`, `.xcworkspace` | XCTest, OCMock |
 
 ### Step 5：提交测试文件
 
@@ -172,6 +176,8 @@ create_or_update_file(
    - Ruby: `describe` + `it '...'`
    - C#: `<Method>_<Condition>_<ExpectedResult>`
    - Swift: `test<Behavior>()`
+   - C/C++: `TEST(...)`/`TEST_CASE(...)`
+   - Objective-C: XCTest method `- (void)test<Behavior>`
    - Frontend: `renders ...`, `calls ... when ...`, `shows ... on error`
 
 读取 `references/test-patterns.md` 了解各语言测试框架模板。

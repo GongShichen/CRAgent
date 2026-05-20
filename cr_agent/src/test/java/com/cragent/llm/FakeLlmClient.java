@@ -15,11 +15,13 @@ public class FakeLlmClient implements LlmClient {
                   "issues": [
                     {
                       "severity": "medium",
-                      "category": "maintainability",
+                      "category": "bug",
                       "file": "src/example.py",
                       "line": 1,
-                      "body": "Simulated issue for validating the Java review pipeline.",
-                      "suggestion": "Configure real credentials to review live PRs.",
+                      "body": "Password is read from query parameters in the changed auth path.",
+                      "evidence": "+password = request.args.get('password')",
+                      "impact": "Credentials can be exposed through URLs, browser history, proxies, and access logs.",
+                      "suggestion": "Read the password from a request body field instead of the query string.",
                       "auto_fixable": false,
                       "confidence": 0.8
                     }
@@ -38,4 +40,3 @@ public class FakeLlmClient implements LlmClient {
         ));
     }
 }
-

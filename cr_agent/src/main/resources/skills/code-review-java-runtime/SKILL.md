@@ -175,7 +175,7 @@ invent shallow checklist comments.
 ## Four Review Sub-Strategies
 
 The runtime provides these strategy outputs in the user message under
-`review_strategy` and `analysis`:
+`review_strategy`, `context_engine`, and `analysis`:
 
 1. **Context Expansion**: extra repository context, including dependency
    manifests, sensitive paths, related tests, security-sensitive file contents,
@@ -191,6 +191,36 @@ The runtime provides these strategy outputs in the user message under
    unsupported findings. Make that gate easy to pass by providing exact
    `evidence`, concrete `impact`, calibrated `severity`, and a valid changed
    `line` or `null`.
+
+## Context Engine Protocol
+
+Prefer `context_engine.context_pack.items` over raw, bulky context. Each context
+item has an `id`, `type`, `path`, `reason`, `score`, and compact `content`.
+When a finding relies on non-diff context, cite the context item id in
+`evidence`, for example `ctx-4 shows the related test only covers the success
+path`.
+
+Use `context_engine.context_index` for orientation and file/symbol discovery,
+not as standalone proof. Use `context_engine.context_ledger` to understand which
+items were selected and which were compressed. Compressed items are weak
+orientation only; request or use stronger evidence before reporting a finding.
+
+## Bounded Tool-Use Nodes
+
+Some non-primary review nodes have limited ReAct-style tool access:
+
+- **Zero-Issue Recovery** may use search, surrounding lines, related tests, LSP,
+  and evidence bundle tools to confirm high-risk probes after an empty first
+  pass.
+- **Candidate Verifier** may use evidence bundle, LSP, surrounding lines, tests,
+  or code search once to decide `KEEP`, `DROP`, or `DEMOTE`.
+- **Repo Audit Batch Review** may use local repo, LSP, static/security,
+  contract, migration, CI, Docker, lockfile, and license tools for the current
+  batch only.
+
+These nodes must keep tool use narrow. Tool results are supporting evidence, not
+permission to review unrelated files or invent findings outside the active
+target.
 
 ## Depth Targets
 
@@ -238,6 +268,14 @@ Available GitHub tools include:
 - `create_pull_request`
 - `add_issue_comment`
 - `detect_test_framework`
+- `lsp_detect_servers`
+- `lsp_capabilities`
+- `lsp_changed_symbols`
+- `lsp_symbol_at_position`
+- `lsp_call_graph`
+- `lsp_related_tests_by_symbol`
+- `lsp_evidence_bundle`
+- `lsp_diagnostics`
 
 Available memory and test tools include:
 
@@ -251,6 +289,32 @@ Available memory and test tools include:
 - `memory_health_report`
 - `infer_test_path`
 - `generate_tests_for_changes`
+
+Available advanced review tools include:
+
+- `run_codeql_scan`
+- `run_semgrep_scan`
+- `run_secret_scan`
+- `run_dependency_vulnerability_scan`
+- `candidate_evidence_bundle`
+- `git_blame_context`
+- `git_recent_file_changes`
+- `git_churn_hotspots`
+- `git_bugfix_history_search`
+- `detect_public_api_changes`
+- `route_contract_diff`
+- `openapi_schema_diff`
+- `protobuf_schema_diff`
+- `db_migration_risk_analyzer`
+- `select_impacted_tests`
+- `run_targeted_tests_readonly`
+- `coverage_for_changed_symbols`
+- `mutation_probe_plan`
+- `github_actions_permission_audit`
+- `dockerfile_risk_scan`
+- `lockfile_diff_summary`
+- `sbom_generate`
+- `license_policy_check`
 
 Prefer answering from the supplied analysis context when it is enough. The Java
 agent already collects PR metadata, changed files, diff, comments, checks,
@@ -268,11 +332,49 @@ Use extra read tools when a finding depends on context outside the diff:
   diff touches manifests or imports new libraries.
 - `scan_sensitive_paths`: orient around auth, security, payment, migration, and
   config-heavy repositories.
+- `lsp_capabilities`: check which read-only LSP servers/tools are available
+  before requesting symbol-level evidence.
+- `lsp_changed_symbols`: map changed diff lines to enclosing classes,
+  functions, methods, or modules.
+- `lsp_symbol_at_position`: find the nearest symbol when an issue only has
+  `file` + `line`.
+- `lsp_call_graph`: collect hover, definition, and references for API contract
+  or call-site impact claims.
+- `lsp_related_tests_by_symbol`: check whether changed behavior has symbol-level
+  tests.
+- `lsp_evidence_bundle`: package source excerpt, symbol, hover, definition,
+  references, and related tests for a candidate issue.
+- `candidate_evidence_bundle`: before publishing an uncertain candidate, gather
+  the hunk, source excerpt, related tests, blame/churn, and static evidence in
+  one compact bundle.
+- `run_codeql_scan`, `run_semgrep_scan`, `run_secret_scan`, and
+  `run_dependency_vulnerability_scan`: use scanner output as supporting
+  evidence for security, dependency, and data-flow findings. Do not turn every
+  scanner alert into a review comment; correlate it with changed behavior first.
+- `detect_public_api_changes`, `route_contract_diff`, `openapi_schema_diff`,
+  `protobuf_schema_diff`, and `db_migration_risk_analyzer`: use these when the
+  diff changes public contracts, routes, schemas, or migrations.
+- `select_impacted_tests`, `run_targeted_tests_readonly`,
+  `coverage_for_changed_symbols`, and `mutation_probe_plan`: use these to make
+  test-gap findings concrete and to identify the smallest meaningful regression
+  checks.
+- `git_blame_context`, `git_recent_file_changes`, `git_churn_hotspots`, and
+  `git_bugfix_history_search`: use history to distinguish risky hot paths from
+  low-impact edits, not to assign blame.
+- `github_actions_permission_audit`, `dockerfile_risk_scan`,
+  `lockfile_diff_summary`, `sbom_generate`, and `license_policy_check`: use
+  these for CI, container, dependency, and supply-chain reviews.
+
+All LSP and advanced scanner tools are read-only. External CLIs may be missing
+or fail in a specific repository; treat `unavailable`, `skipped`, and `failed`
+tool results as non-blocking context and continue using diff, repository
+context, static checks, and language skills.
 
 When reviewing language-specific code, apply the dedicated checklist sections
-for Java/Spring/JVM, Rust, JavaScript/TypeScript frontend, and Go. Keep findings
-specific to the changed lines rather than turning those checklists into generic
-style advice.
+for Java/Spring/JVM, Rust, JavaScript/TypeScript frontend, Go, Swift/iOS,
+C/C++, Objective-C/Cocoa, Ruby/Rails, PHP, and C#/.NET. Keep findings specific
+to the changed lines rather than turning those checklists into generic style
+advice.
 
 ## Runtime Differences From Reference Skills
 

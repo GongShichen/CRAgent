@@ -19,13 +19,36 @@ public record Settings(
         Path reportDir,
         int maxIterations,
         int maxToolResultChars,
-        int humanReviewChangedLinesThreshold,
-        int repoAuditBatchTokenBudget,
-        int repoAuditMaxFileChars,
         boolean repoAuditRunChecks,
         boolean lspEnabled,
-        int lspTimeoutSeconds
+        int lspTimeoutSeconds,
+        boolean verifierEnabled,
+        int verifierMaxCandidates,
+        int reviewMaxComments,
+        double reviewPublishThreshold,
+        boolean zeroIssueRecovery,
+        boolean languageSkillsEnabled,
+        int languageSkillMaxSelected,
+        int recoveryMaxToolRounds,
+        int verifierMaxToolRounds,
+        int repoBatchMaxToolRounds,
+        boolean llmTriageAdvice,
+        boolean llmContextScout,
+        boolean llmRiskRefinement,
+        boolean llmTestReasoning,
+        boolean llmActPlanning,
+        int contextRrfK,
+        int contextMaxItems
 ) {
+    public Settings(String openaiBaseUrl, String openaiApiKey, String openaiModel, String githubToken,
+                    boolean dryRun, Path traceDir, Path memoryDir, Path reportDir, int maxIterations,
+                    int maxToolResultChars, boolean repoAuditRunChecks, boolean lspEnabled, int lspTimeoutSeconds) {
+        this(openaiBaseUrl, openaiApiKey, openaiModel, githubToken, dryRun, traceDir, memoryDir, reportDir,
+                maxIterations, maxToolResultChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds,
+                true, 8, 6, 0.45, true, true, 6, 6, 4, 6,
+                true, true, true, true, false, 60, 40);
+    }
+
     public static Settings load() {
         Map<String, String> env = new HashMap<>();
         env.putAll(System.getenv());
@@ -46,8 +69,26 @@ public record Settings(
 
     public Settings withDryRun(boolean value) {
         return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, githubToken, value, traceDir, memoryDir, reportDir,
-                maxIterations, maxToolResultChars, humanReviewChangedLinesThreshold,
-                repoAuditBatchTokenBudget, repoAuditMaxFileChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds);
+                maxIterations, maxToolResultChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds,
+                verifierEnabled, verifierMaxCandidates, reviewMaxComments, reviewPublishThreshold, zeroIssueRecovery,
+                languageSkillsEnabled, languageSkillMaxSelected, recoveryMaxToolRounds, verifierMaxToolRounds, repoBatchMaxToolRounds,
+                llmTriageAdvice, llmContextScout, llmRiskRefinement, llmTestReasoning, llmActPlanning, contextRrfK, contextMaxItems);
+    }
+
+    public Settings withTraceDir(Path value) {
+        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, githubToken, dryRun, value, memoryDir, reportDir,
+                maxIterations, maxToolResultChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds,
+                verifierEnabled, verifierMaxCandidates, reviewMaxComments, reviewPublishThreshold, zeroIssueRecovery,
+                languageSkillsEnabled, languageSkillMaxSelected, recoveryMaxToolRounds, verifierMaxToolRounds, repoBatchMaxToolRounds,
+                llmTriageAdvice, llmContextScout, llmRiskRefinement, llmTestReasoning, llmActPlanning, contextRrfK, contextMaxItems);
+    }
+
+    public Settings withVerifierEnabled(boolean value) {
+        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, githubToken, dryRun, traceDir, memoryDir, reportDir,
+                maxIterations, maxToolResultChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds,
+                value, verifierMaxCandidates, reviewMaxComments, reviewPublishThreshold, zeroIssueRecovery,
+                languageSkillsEnabled, languageSkillMaxSelected, recoveryMaxToolRounds, verifierMaxToolRounds, repoBatchMaxToolRounds,
+                llmTriageAdvice, llmContextScout, llmRiskRefinement, llmTestReasoning, llmActPlanning, contextRrfK, contextMaxItems);
     }
 
     private static Settings from(Map<String, String> env) {
@@ -62,12 +103,26 @@ public record Settings(
                 resolveRepoPath(env.getOrDefault("CR_AGENT_REPORT_DIR", "report")),
                 Integer.parseInt(env.getOrDefault("CR_AGENT_MAX_ITERATIONS", "30")),
                 Integer.parseInt(env.getOrDefault("CR_AGENT_MAX_TOOL_RESULT_CHARS", "12000")),
-                Integer.parseInt(env.getOrDefault("CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD", "2000")),
-                Integer.parseInt(env.getOrDefault("CR_AGENT_REPO_AUDIT_BATCH_TOKEN_BUDGET", "60000")),
-                Integer.parseInt(env.getOrDefault("CR_AGENT_REPO_AUDIT_MAX_FILE_CHARS", "20000")),
                 Boolean.parseBoolean(env.getOrDefault("CR_AGENT_REPO_AUDIT_RUN_CHECKS", "true")),
                 Boolean.parseBoolean(env.getOrDefault("CR_AGENT_LSP_ENABLED", "true")),
-                Integer.parseInt(env.getOrDefault("CR_AGENT_LSP_TIMEOUT_SECONDS", "30"))
+                Integer.parseInt(env.getOrDefault("CR_AGENT_LSP_TIMEOUT_SECONDS", "30")),
+                Boolean.parseBoolean(env.getOrDefault("CR_AGENT_VERIFIER_ENABLED", "true")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_VERIFIER_MAX_CANDIDATES", "8")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_REVIEW_MAX_COMMENTS", "6")),
+                Double.parseDouble(env.getOrDefault("CR_AGENT_REVIEW_PUBLISH_THRESHOLD", "0.45")),
+                Boolean.parseBoolean(env.getOrDefault("CR_AGENT_ZERO_ISSUE_RECOVERY", "true")),
+                Boolean.parseBoolean(env.getOrDefault("CR_AGENT_LANGUAGE_SKILLS_ENABLED", "true")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_LANGUAGE_SKILL_MAX_SELECTED", "6")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_RECOVERY_MAX_TOOL_ROUNDS", "6")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_VERIFIER_MAX_TOOL_ROUNDS", "4")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_REPO_BATCH_MAX_TOOL_ROUNDS", "6")),
+                Boolean.parseBoolean(env.getOrDefault("CR_AGENT_LLM_TRIAGE_ADVICE", "true")),
+                Boolean.parseBoolean(env.getOrDefault("CR_AGENT_LLM_CONTEXT_SCOUT", "true")),
+                Boolean.parseBoolean(env.getOrDefault("CR_AGENT_LLM_RISK_REFINEMENT", "true")),
+                Boolean.parseBoolean(env.getOrDefault("CR_AGENT_LLM_TEST_REASONING", "true")),
+                Boolean.parseBoolean(env.getOrDefault("CR_AGENT_LLM_ACT_PLANNING", "false")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_CONTEXT_RRF_K", "60")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_CONTEXT_MAX_ITEMS", "40"))
         );
     }
 

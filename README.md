@@ -4,9 +4,9 @@
 
 ![CR-Agent architecture](docs/architecture.svg)
 
-CR-Agent 是一个 Java 实现的 agentic code review 系统。它面向 PR、commit diff、默认分支最新提交和全量仓库审查，能够自动识别 review 目标、收集上下文、执行多阶段代码审查、记录完整轨迹，并导出 SFT/DPO 训练数据。
+CR-Agent 是一个 Java 实现的 agentic code review 系统。它面向 PR、commit diff、默认分支最新提交和全量仓库审查，能够自动识别 review 目标、收集上下文、执行多阶段代码审查、记录完整轨迹，并导出 AgenticRL rollout 与 reward 数据。
 
-当前主 agent 使用 Java/Gradle 工程实现，SFT/DPO 训练脚本保留在 Python 侧。
+当前主 agent 使用 Java/Gradle 工程实现，AgenticRL 训练脚本保留在 Python 侧。
 
 ## 核心能力
 
@@ -22,7 +22,7 @@ CR-Agent 是一个 Java 实现的 agentic code review 系统。它面向 PR、co
 - 安全执行：默认 dry-run；真实写操作失败不会阻塞 review 主流程。
 - 轨迹记录：每次运行写入 JSONL trace，包含 phase、LLM 请求/响应、tool call/result、issue、action 和错误。
 - Memory 系统：记录 developer profile、repo pattern、false positive 规则和 health report。
-- 数据导出：从 trace 导出 SFT、DPO 和 tool-supervision 数据。
+- 数据导出：从 trace 导出 AgenticRL episodes 与 reward labels。
 
 ## 工程结构
 
@@ -39,7 +39,7 @@ CR-Agent/
 │   │   ├── agent/          # CodeReviewAgent 主流程与结果解析
 │   │   ├── cli/            # 运行入口、意图解析、本机 Git/GitHub token 检查
 │   │   ├── config/         # .env 与环境变量配置
-│   │   ├── datasets/       # SFT/DPO/tool-supervision 导出
+│   │   ├── datasets/       # AgenticRL rollout/reward 导出
 │   │   ├── llm/            # OpenAI-compatible LLM client
 │   │   ├── memory/         # JSONL memory store
 │   │   ├── model/          # Agent/issue/tool 数据模型
@@ -60,11 +60,9 @@ CR-Agent/
 │       ├── traces/
 │       └── memory/
 ├── datasets/
-│   ├── SFT/
-│   └── DPO/
+│   └── RL/
 ├── train/
-│   ├── sft_train.py
-│   └── dpo_train.py
+│   └── agentic_rl_train.py
 └── model/
 ```
 
@@ -147,9 +145,6 @@ CR_AGENT_MEMORY_DIR=data/memory
 CR_AGENT_REPORT_DIR=report
 CR_AGENT_MAX_ITERATIONS=30
 CR_AGENT_MAX_TOOL_RESULT_CHARS=12000
-CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD=2000
-CR_AGENT_REPO_AUDIT_BATCH_TOKEN_BUDGET=60000
-CR_AGENT_REPO_AUDIT_MAX_FILE_CHARS=20000
 CR_AGENT_REPO_AUDIT_RUN_CHECKS=true
 CR_AGENT_LSP_ENABLED=true
 CR_AGENT_LSP_TIMEOUT_SECONDS=30
@@ -167,9 +162,6 @@ CR_AGENT_LSP_TIMEOUT_SECONDS=30
 - `CR_AGENT_REPORT_DIR`：review report 输出目录；相对路径会解析到项目根目录，默认 `report/`。
 - `CR_AGENT_MAX_ITERATIONS`：agent tool-use 最大轮数。
 - `CR_AGENT_MAX_TOOL_RESULT_CHARS`：单次工具返回最大字符数。
-- `CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD`：超过该 changed lines 阈值时建议人工 review。
-- `CR_AGENT_REPO_AUDIT_BATCH_TOKEN_BUDGET`：全量 CR 每批渐进式加载的预算，用于控制 batch 大小，不用于截断文件总数。
-- `CR_AGENT_REPO_AUDIT_MAX_FILE_CHARS`：单个文件片段最大字符数，超出会按连续行号切片。
 - `CR_AGENT_REPO_AUDIT_RUN_CHECKS`：全量 CR 是否运行只读静态检查。
 - `CR_AGENT_LSP_ENABLED`：是否启用真实 LSP JSON-RPC 上下文增强。
 - `CR_AGENT_LSP_TIMEOUT_SECONDS`：单次 LSP 请求超时时间。
@@ -287,6 +279,46 @@ lsp_diagnostics
 
 Git、GitHub token、memory、trace 和 dataset 导出能力仍在代码中保留给内部流程使用；对外只保留统一运行入口。
 
+## Fresh Raw 数据采集
+
+用于训练前收集非 benchmark 的 raw review 任务：
+
+```bash
+scripts/run_raw_dataset.sh --limit 1000
+```
+
+该脚本会按 CR-Agent 当前支持语言生成 `datasets/raw/tasks.jsonl`，默认约 80% diff CR、20% 完整仓库 CR，并排除现有 benchmark 仓库与 PR。实际执行入口：
+
+```bash
+cd cr_agent
+./gradlew run --args="run-dataset --tasks ../datasets/raw/tasks.jsonl --limit 1000 --resume"
+```
+
+输出包括：
+
+```text
+datasets/raw/source_queries.jsonl
+datasets/raw/denylist.json
+datasets/raw/tasks.jsonl
+datasets/raw/runs/<run_id>/manifest.json
+cr_agent/data/traces/raw/<run_id>/*.jsonl
+```
+
+训练前清洗 raw manifest：
+
+```bash
+scripts/clean_raw_dataset.sh
+scripts/clean_raw_dataset.sh --require-success
+```
+
+清洗输出：
+
+```text
+datasets/clean/tasks.clean.jsonl
+datasets/clean/results.clean.jsonl
+datasets/clean/clean_report.json
+```
+
 ## Review 输出
 
 命令行会输出：
@@ -392,25 +424,43 @@ session_end
 输出目录：
 
 ```text
-datasets/SFT/sft.jsonl
-datasets/DPO/dpo.jsonl
+datasets/RL/episodes.jsonl
+datasets/RL/rewards.jsonl
 ```
+
+`episodes.jsonl` 面向 AgenticRL：每行是一个完整 agent rollout，包含
+`state -> action -> observation -> reward -> done`。`rewards.jsonl` 是对应
+session 的终局 reward 与组件分解，默认使用可解释的 trace heuristic，后续可
+用 benchmark TP/FP/FN 或人工反馈替换。
 
 ## Python 训练
 
-Java 负责 agent 执行和数据导出。SFT/DPO 训练仍由 Python 脚本执行：
+Java 负责 agent 执行和数据导出。AgenticRL 训练由 Python 脚本执行，Python
+环境使用 `uv` 创建和管理：
 
 ```bash
-pip install -r train/requirements.txt
-python train/sft_train.py --base-model Qwen/Qwen2.5-Coder-7B-Instruct --model-name qwen2.5-coder-7b
-python train/dpo_train.py --base-model model/qwen2.5-coder-7b/sft --model-name qwen2.5-coder-7b
+uv sync
+uv run python train/agentic_rl_train.py \
+  --base-model Qwen/Qwen2.5-Coder-7B-Instruct \
+  --model-name qwen2.5-coder-7b \
+  --episodes datasets/clean/RL/episodes.clean.jsonl \
+  --rewards datasets/clean/RL/rewards.clean.jsonl
+```
+
+训练脚本支持 `--device auto|cuda|mps|cpu`。默认 `auto` 会优先使用 CUDA，其次
+Apple MPS，最后 CPU。CUDA 环境先用 `uv` 创建环境，再安装匹配驱动的 CUDA
+PyTorch wheel，例如 CUDA 12.4：
+
+```bash
+uv sync
+uv pip install --upgrade torch --index-url https://download.pytorch.org/whl/cu124
+uv run python train/agentic_rl_train.py ... --device cuda --dtype float16
 ```
 
 模型和权重输出：
 
 ```text
-model/<model_name>/sft/
-model/<model_name>/dpo/
+model/<model_name>/agentic_rl/
 ```
 
 ## 开发与验证
@@ -441,5 +491,4 @@ cd cr_agent
 
 - 首次运行建议保持 `CR_AGENT_DRY_RUN=true`。
 - 确认 GitHub token 权限后，再切换到 `CR_AGENT_DRY_RUN=false`。
-- 对超大 PR，可调高或调低 `CR_AGENT_HUMAN_REVIEW_CHANGED_LINES_THRESHOLD`。
 - 写权限失败不应阻塞 review，agent 会继续输出 summary、issues、actions 和 trace。

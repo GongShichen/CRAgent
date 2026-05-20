@@ -2,6 +2,7 @@ package com.cragent.tools;
 
 import com.cragent.agent.RepoAuditIndexer;
 import com.cragent.agent.RepoStaticChecks;
+import com.cragent.agent.AppleXcodeContext;
 import com.cragent.config.Settings;
 
 import java.nio.charset.StandardCharsets;
@@ -38,6 +39,9 @@ public class RepoAuditTools {
         router.register(new ToolSpec("run_static_checks", "Run safe read-only static checks for a local repo.", object(Map.of(
                 "repo_path", str("Local repository path")
         ), List.of("repo_path")), this::runStaticChecks, false));
+        router.register(new ToolSpec("apple_xcode_context", "Detect Apple platform project markers and Xcode MCP bridge availability for Swift/Objective-C repository review.", object(Map.of(
+                "repo_path", str("Local repository path")
+        ), List.of("repo_path")), this::appleXcodeContext, false));
         router.register(new ToolSpec("search_repo_text", "Search text in readable repository files.", object(Map.of(
                 "repo_path", str("Local repository path"),
                 "query", str("Search query")
@@ -81,6 +85,10 @@ public class RepoAuditTools {
         Path root = path(args, "repo_path");
         RepoAuditIndexer.AuditIndex index = new RepoAuditIndexer(settings).index(root);
         return new RepoStaticChecks().run(root, index.stack());
+    }
+
+    private Object appleXcodeContext(Map<String, Object> args) {
+        return AppleXcodeContext.probe(path(args, "repo_path"));
     }
 
     private Object searchRepoText(Map<String, Object> args) {

@@ -56,6 +56,36 @@ public class LspTools {
         router.register(new ToolSpec("lsp_diagnostics", "Open supported files through real LSP servers and collect publishDiagnostics.", object(Map.of(
                 "repo_path", str("Local repository path")
         ), List.of("repo_path")), this::diagnostics, false));
+        router.register(new ToolSpec("lsp_capabilities", "Report available read-only LSP servers and high-level CR LSP tools.", object(Map.of(
+                "repo_path", str("Local repository path")
+        ), List.of("repo_path")), this::capabilities, false));
+        router.register(new ToolSpec("lsp_symbol_at_position", "Find the nearest document symbol for a file and line.", object(Map.of(
+                "repo_path", str("Local repository path"),
+                "path", str("Relative file path"),
+                "line", integer("1-based line number")
+        ), List.of("repo_path", "path", "line")), this::symbolAtPosition, false));
+        router.register(new ToolSpec("lsp_changed_symbols", "Map changed files and diff lines to containing symbols.", object(Map.of(
+                "repo_path", str("Local repository path"),
+                "changed_files", ToolSchemas.array("Changed files with filename/path and patch or changed_lines")
+        ), List.of("repo_path", "changed_files")), this::changedSymbols, false));
+        router.register(new ToolSpec("lsp_call_graph", "Build a read-only call graph evidence bundle for a symbol position using definition, references, and hover.", object(Map.of(
+                "repo_path", str("Local repository path"),
+                "path", str("Relative file path"),
+                "line", integer("1-based line number"),
+                "character", integer("0-based character offset")
+        ), List.of("repo_path", "path", "line", "character")), this::callGraph, false));
+        router.register(new ToolSpec("lsp_related_tests_by_symbol", "Find test files related to the symbol at a file position.", object(Map.of(
+                "repo_path", str("Local repository path"),
+                "path", str("Relative file path"),
+                "line", integer("1-based line number"),
+                "character", integer("0-based character offset")
+        ), List.of("repo_path", "path", "line", "character")), this::relatedTestsBySymbol, false));
+        router.register(new ToolSpec("lsp_evidence_bundle", "Bundle symbol, hover, definition, references, source excerpt, and related tests for a review candidate.", object(Map.of(
+                "repo_path", str("Local repository path"),
+                "path", str("Relative file path"),
+                "line", integer("1-based line number"),
+                "character", integer("0-based character offset")
+        ), List.of("repo_path", "path", "line", "character")), this::evidenceBundle, false));
     }
 
     private Object detectServers(Map<String, Object> args) {
@@ -109,6 +139,59 @@ public class LspTools {
             Path root = path(args);
             RepoAuditIndexer.AuditIndex index = new RepoAuditIndexer(settings).index(root);
             return new LspAnalyzer(settings).diagnostics(root, index);
+        });
+    }
+
+    private Object capabilities(Map<String, Object> args) {
+        return runLsp(() -> {
+            Path root = path(args);
+            RepoAuditIndexer.AuditIndex index = new RepoAuditIndexer(settings).index(root);
+            return new LspAnalyzer(settings).capabilities(root, index);
+        });
+    }
+
+    private Object symbolAtPosition(Map<String, Object> args) {
+        return runLsp(() -> {
+            Path root = path(args);
+            RepoAuditIndexer.AuditIndex index = new RepoAuditIndexer(settings).index(root);
+            return new LspAnalyzer(settings).symbolAtPosition(root, index, String.valueOf(args.get("path")), intArg(args, "line", 1));
+        });
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object changedSymbols(Map<String, Object> args) {
+        return runLsp(() -> {
+            Path root = path(args);
+            RepoAuditIndexer.AuditIndex index = new RepoAuditIndexer(settings).index(root);
+            Object raw = args.getOrDefault("changed_files", List.of());
+            List<Map<String, Object>> files = raw instanceof List<?> list
+                    ? list.stream().filter(Map.class::isInstance).map(Map.class::cast).map(map -> (Map<String, Object>) map).toList()
+                    : List.of();
+            return new LspAnalyzer(settings).changedSymbols(root, index, files);
+        });
+    }
+
+    private Object callGraph(Map<String, Object> args) {
+        return runLsp(() -> {
+            Path root = path(args);
+            RepoAuditIndexer.AuditIndex index = new RepoAuditIndexer(settings).index(root);
+            return new LspAnalyzer(settings).callGraph(root, index, String.valueOf(args.get("path")), intArg(args, "line", 1), intArg(args, "character", 0));
+        });
+    }
+
+    private Object relatedTestsBySymbol(Map<String, Object> args) {
+        return runLsp(() -> {
+            Path root = path(args);
+            RepoAuditIndexer.AuditIndex index = new RepoAuditIndexer(settings).index(root);
+            return new LspAnalyzer(settings).relatedTestsBySymbol(root, index, String.valueOf(args.get("path")), intArg(args, "line", 1), intArg(args, "character", 0));
+        });
+    }
+
+    private Object evidenceBundle(Map<String, Object> args) {
+        return runLsp(() -> {
+            Path root = path(args);
+            RepoAuditIndexer.AuditIndex index = new RepoAuditIndexer(settings).index(root);
+            return new LspAnalyzer(settings).evidenceBundle(root, index, String.valueOf(args.get("path")), intArg(args, "line", 1), intArg(args, "character", 0));
         });
     }
 

@@ -17,8 +17,6 @@ import java.util.Locale;
 import java.util.Map;
 
 public class RepoAuditIndexer {
-    private static final long HARD_MAX_BYTES = 1_000_000L;
-
     private final Settings settings;
 
     public RepoAuditIndexer(Settings settings) {
@@ -110,10 +108,6 @@ public class RepoAuditIndexer {
         }
         try {
             long bytes = Files.size(path);
-            if (bytes > HARD_MAX_BYTES) {
-                skipped.add(Map.of("path", rel, "reason", "too_large"));
-                return;
-            }
             String content = Files.readString(path, StandardCharsets.UTF_8);
             reviewed.add(new AuditFile(rel, language(rel), bytes, lines(content), isTest(rel), isConfig(rel), sensitive(rel), content));
         } catch (Exception e) {
@@ -122,46 +116,17 @@ public class RepoAuditIndexer {
     }
 
     private List<AuditSlice> slicesFor(Path repoPath, AuditFile file) {
-        List<AuditSlice> out = new ArrayList<>();
-        String[] lines = file.content().split("\\R", -1);
-        int maxChars = Math.max(2000, settings.repoAuditMaxFileChars());
-        int start = 1;
-        StringBuilder chunk = new StringBuilder();
-        for (int i = 0; i < lines.length; i++) {
-            String line = lines[i];
-            if (chunk.length() + line.length() + 1 > maxChars && !chunk.isEmpty()) {
-                out.add(new AuditSlice(file.path(), start, i, chunk.toString()));
-                start = i + 1;
-                chunk = new StringBuilder();
-            }
-            chunk.append(line).append('\n');
-        }
-        if (!chunk.isEmpty()) {
-            out.add(new AuditSlice(file.path(), start, Math.max(start, lines.length), chunk.toString()));
-        }
-        return out;
+        int lineCount = Math.max(1, lines(file.content()));
+        return List.of(new AuditSlice(file.path(), 1, lineCount, file.content()));
     }
 
     public List<List<AuditSlice>> batches(List<AuditSlice> slices) {
-        int budgetChars = Math.max(8000, settings.repoAuditBatchTokenBudget() * 3);
         List<AuditSlice> ordered = slices.stream()
                 .sorted(Comparator.comparingInt((AuditSlice s) -> riskRank(s.path())).thenComparing(AuditSlice::path))
                 .toList();
         List<List<AuditSlice>> batches = new ArrayList<>();
-        List<AuditSlice> current = new ArrayList<>();
-        int chars = 0;
         for (AuditSlice slice : ordered) {
-            int size = slice.content().length();
-            if (!current.isEmpty() && chars + size > budgetChars) {
-                batches.add(current);
-                current = new ArrayList<>();
-                chars = 0;
-            }
-            current.add(slice);
-            chars += size;
-        }
-        if (!current.isEmpty()) {
-            batches.add(current);
+            batches.add(List.of(slice));
         }
         return batches;
     }
@@ -198,10 +163,11 @@ public class RepoAuditIndexer {
         if (lower.equals("memory") || lower.endsWith("/memory")) return "runtime_artifact";
         if (lower.equals("node_modules") || lower.endsWith("/node_modules")) return "vendor_cache";
         if (lower.equals("vendor") || lower.endsWith("/vendor")) return "vendor_cache";
+        if (lower.equals("pods") || lower.endsWith("/pods")) return "vendor_cache";
         if (lower.equals("third_party") || lower.endsWith("/third_party")) return "vendor_cache";
         if (lower.equals("build") || lower.endsWith("/build") || lower.equals("dist") || lower.endsWith("/dist")
                 || lower.equals("target") || lower.endsWith("/target") || lower.equals("out") || lower.endsWith("/out")
-                || lower.equals("coverage") || lower.endsWith("/coverage")) return "build_artifact";
+                || lower.equals("coverage") || lower.endsWith("/coverage") || lower.equals("deriveddata") || lower.endsWith("/deriveddata")) return "build_artifact";
         if (lower.equals(".gradle") || lower.endsWith("/.gradle") || lower.equals(".idea") || lower.endsWith("/.idea")
                 || lower.equals(".venv") || lower.endsWith("/.venv") || lower.equals("__pycache__") || lower.endsWith("/__pycache__")
                 || lower.equals(".cache") || lower.endsWith("/.cache") || lower.equals(".pytest_cache") || lower.endsWith("/.pytest_cache")
@@ -219,7 +185,21 @@ public class RepoAuditIndexer {
         if (lower.endsWith(".go")) return "go";
         if (lower.endsWith(".py")) return "python";
         if (lower.endsWith(".rs")) return "rust";
-        if (lower.endsWith(".yml") || lower.endsWith(".yaml") || lower.endsWith(".json") || lower.endsWith(".toml") || lower.endsWith(".xml")) return "config";
+        if (lower.endsWith(".cs")) return "csharp";
+        if (lower.endsWith(".php")) return "php";
+        if (lower.endsWith(".swift")) return "swift";
+        if (lower.endsWith(".rb") || lower.endsWith(".gemspec") || lower.endsWith("/gemfile") || lower.equals("gemfile")) return "ruby";
+        if (lower.endsWith(".m") || lower.endsWith(".mm")) return "objective-c";
+        if (lower.endsWith(".c")) return "c";
+        if (lower.endsWith(".cc") || lower.endsWith(".cpp") || lower.endsWith(".cxx") || lower.endsWith(".hpp")
+                || lower.endsWith(".hh") || lower.endsWith(".hxx")) return "cpp";
+        if (lower.endsWith(".h")) return "c-header";
+        if (lower.endsWith(".yml") || lower.endsWith(".yaml")) return "yaml";
+        if (lower.endsWith(".json")) return "json";
+        if (lower.endsWith("dockerfile") || lower.endsWith(".dockerfile")) return "dockerfile";
+        if (lower.endsWith(".toml") || lower.endsWith(".xml")) return "config";
+        if (lower.endsWith("cmakelists.txt") || lower.endsWith("makefile") || lower.endsWith("package.swift")
+                || lower.endsWith("podfile") || lower.endsWith("podfile.lock")) return "config";
         if (lower.endsWith(".md")) return "markdown";
         return "text";
     }
@@ -227,19 +207,28 @@ public class RepoAuditIndexer {
     private static boolean isTest(String path) {
         String lower = path.toLowerCase(Locale.ROOT);
         return lower.contains("/test/") || lower.contains("/tests/") || lower.endsWith("_test.go") || lower.endsWith("_test.rs")
-                || lower.endsWith(".test.ts") || lower.endsWith(".spec.ts") || lower.endsWith("test.java");
+                || lower.endsWith(".test.ts") || lower.endsWith(".spec.ts") || lower.endsWith("test.java")
+                || lower.endsWith("_spec.rb") || lower.endsWith("_test.rb") || lower.startsWith("spec/")
+                || lower.endsWith("tests.swift") || lower.endsWith("test.swift")
+                || lower.endsWith("_test.c") || lower.endsWith("_test.cc") || lower.endsWith("_test.cpp") || lower.endsWith("_test.mm")
+                || lower.endsWith("test.m") || lower.endsWith("test.mm");
     }
 
     private static boolean isConfig(String path) {
         String lower = path.toLowerCase(Locale.ROOT);
         return lower.endsWith("pom.xml") || lower.endsWith("build.gradle") || lower.endsWith("package.json")
-                || lower.endsWith("cargo.toml") || lower.endsWith("pyproject.toml") || lower.contains(".github/workflows/");
+                || lower.endsWith("cargo.toml") || lower.endsWith("pyproject.toml") || lower.contains(".github/workflows/")
+                || lower.endsWith("cmakelists.txt") || lower.endsWith("makefile") || lower.endsWith("compile_commands.json")
+                || lower.endsWith("package.swift") || lower.endsWith("podfile") || lower.endsWith("podfile.lock")
+                || lower.endsWith("gemfile") || lower.endsWith("gemfile.lock") || lower.endsWith(".gemspec");
     }
 
     private static boolean sensitive(String path) {
         String lower = path.toLowerCase(Locale.ROOT);
         return lower.contains("auth") || lower.contains("security") || lower.contains("token") || lower.contains("password")
-                || lower.contains("permission") || lower.contains("payment") || lower.contains("migration") || lower.contains("crypto");
+                || lower.contains("permission") || lower.contains("payment") || lower.contains("migration") || lower.contains("crypto")
+                || lower.contains("keychain") || lower.contains("credential") || lower.contains("privacy") || lower.contains("certificate")
+                || lower.contains("unsafe") || lower.contains("native") || lower.contains("ffi");
     }
 
     private static int riskRank(String path) {
