@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120" role="img" aria-labelledby="title desc">
   <title id="title">CR-Agent current architecture</title>
-  <desc id="desc">Current Java CR-Agent architecture with LLM intent routing, shared review nodes, diff review, full repository audit, LSP preflight, traces, memory, reports, datasets, and Python training.</desc>
+  <desc id="desc">Current Java CR-Agent architecture with LLM intent routing, shared review nodes, language skill routing, hybrid RRF context retrieval, diff review, full repository audit, LSP preflight, traces, memory, reports, AgenticRL datasets, and uv-managed Python training.</desc>
   <defs>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
       <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#1b334a" flood-opacity="0.13"/>
@@ -32,7 +32,7 @@
 
   <rect class="bg" x="0" y="0" width="1800" height="1120"/>
   <text class="title" x="80" y="72">CR-Agent Java Architecture</text>
-  <text class="subtitle" x="80" y="106">Agentic code review system with LLM intent routing, shared review nodes, progressive full-repo audit, LSP context, reports, traces, and training data export.</text>
+  <text class="subtitle" x="80" y="106">Agentic code review system with LLM intent routing, language skills, hybrid RRF context, progressive full-repo audit, LSP context, traces, reports, and AgenticRL export.</text>
 
   <rect class="box entry" x="70" y="155" width="310" height="160"/>
   <text class="section" x="98" y="195">Agent Entry</text>
@@ -101,14 +101,14 @@
   <text class="tiny" x="550" y="796">skip when server missing</text>
 
   <rect class="box node" x="805" y="700" width="240" height="125"/>
-  <text class="label" x="835" y="742">Review Strategy</text>
-  <text class="tiny" x="835" y="772">risk modeling</text>
-  <text class="tiny" x="835" y="796">context expansion</text>
+  <text class="label" x="835" y="742">Language Skills</text>
+  <text class="tiny" x="835" y="772">router selects skill packs</text>
+  <text class="tiny" x="835" y="796">Java, TS, Go, Rust, Swift...</text>
 
   <rect class="box node" x="1090" y="700" width="240" height="125"/>
-  <text class="label" x="1120" y="742">Test Reasoning</text>
-  <text class="tiny" x="1120" y="772">regression paths</text>
-  <text class="tiny" x="1120" y="796">concrete test gaps</text>
+  <text class="label" x="1120" y="742">Context Engine</text>
+  <text class="tiny" x="1120" y="772">hybrid retrieval + RRF</text>
+  <text class="tiny" x="1120" y="796">diff, LSP, tests, memory</text>
 
   <rect class="box node" x="1375" y="700" width="240" height="125"/>
   <text class="label" x="1405" y="742">Evidence Validation</text>
@@ -129,15 +129,15 @@
 
   <rect class="box train" x="1015" y="900" width="300" height="145"/>
   <text class="section" x="1045" y="940">Dataset Export</text>
-  <text class="small" x="1045" y="976">SFT JSONL</text>
-  <text class="small" x="1045" y="1006">DPO JSONL</text>
-  <text class="small" x="1045" y="1036">Tool supervision JSONL</text>
+  <text class="small" x="1045" y="976">AgenticRL episodes</text>
+  <text class="small" x="1045" y="1006">Reward labels</text>
+  <text class="small" x="1045" y="1036">Trace-derived rollouts</text>
 
   <rect class="box train" x="1380" y="900" width="300" height="145"/>
   <text class="section" x="1410" y="940">Python Training</text>
-  <text class="small" x="1410" y="976">train/sft_train.py</text>
-  <text class="small" x="1410" y="1006">train/dpo_train.py</text>
-  <text class="small" x="1410" y="1036">model/&lt;model_name&gt;/</text>
+  <text class="small" x="1410" y="976">uv sync / uv run</text>
+  <text class="small" x="1410" y="1006">CUDA / MPS / CPU</text>
+  <text class="small" x="1410" y="1036">agentic_rl_train.py</text>
 
   <path class="line" d="M380 235 H450"/>
   <path class="line" d="M380 460 C410 420 430 300 455 240"/>
