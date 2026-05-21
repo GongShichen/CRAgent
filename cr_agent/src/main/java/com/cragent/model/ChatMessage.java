@@ -6,6 +6,7 @@ import java.util.Map;
 public class ChatMessage {
     public String role;
     public String content;
+    public String reasoningContent;
     public List<Map<String, Object>> toolCalls;
     public String toolCallId;
 
@@ -23,4 +24,3 @@ public class ChatMessage {
         return message;
     }
 }
-

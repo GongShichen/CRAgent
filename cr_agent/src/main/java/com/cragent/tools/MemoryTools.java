@@ -18,9 +18,15 @@ import static com.cragent.tools.ToolSchemas.*;
 
 public class MemoryTools {
     private final MemoryStore store;
+    private final boolean readEnabled;
 
     public MemoryTools(MemoryStore store) {
+        this(store, true);
+    }
+
+    public MemoryTools(MemoryStore store, boolean readEnabled) {
         this.store = store;
+        this.readEnabled = readEnabled;
     }
 
     public void register(ToolRouter router) {
@@ -60,6 +66,9 @@ public class MemoryTools {
     }
 
     public Object memoryGetAll(Map<String, Object> args) {
+        if (!readEnabled) {
+            return emptyMemory("memory_read_disabled");
+        }
         ensureBuiltins();
         int maxTokens = intArg(args, "max_tokens", 3000);
         List<Map<String, Object>> rules = store.read("rules");
@@ -103,6 +112,14 @@ public class MemoryTools {
     }
 
     public Object memoryGetDeveloperProfile(Map<String, Object> args) {
+        if (!readEnabled) {
+            String author = String.valueOf(args.get("author"));
+            return Map.of("found", false, "disabled", true, "profile", Map.of(
+                    "type", "developer_profile",
+                    "content", Map.of("author", author, "issue_history", List.of(), "strengths", List.of(), "growth_areas", List.of(), "pr_count", 0,
+                            "message", "Memory reads are disabled for this run")
+            ));
+        }
         String author = String.valueOf(args.get("author"));
         for (Map<String, Object> profile : store.read("developer_profiles")) {
             Map<String, Object> content = content(profile);
@@ -218,6 +235,9 @@ public class MemoryTools {
     }
 
     public Object memoryHealthReport(Map<String, Object> args) {
+        if (!readEnabled) {
+            return Map.of("repo", String.valueOf(args.get("repo")), "disabled", true, "total_occurrences", 0, "top_patterns", List.of());
+        }
         String repo = String.valueOf(args.get("repo"));
         List<Map<String, Object>> patterns = store.read("repo_patterns").stream().filter(p -> repo.equals(content(p).get("repo"))).toList();
         int total = patterns.stream().mapToInt(p -> intValue(content(p).getOrDefault("occurrence_count", 0))).sum();
@@ -226,6 +246,17 @@ public class MemoryTools {
                 .limit(10)
                 .toList();
         return Map.of("repo", repo, "total_occurrences", total, "top_patterns", top);
+    }
+
+    private static Map<String, Object> emptyMemory(String reason) {
+        return Map.of(
+                "disabled", true,
+                "reason", reason,
+                "rules", List.of(),
+                "developer_profiles", List.of(),
+                "repo_patterns", List.of(),
+                "summary", "Memory reads are disabled for this run."
+        );
     }
 
     private void ensureBuiltins() {

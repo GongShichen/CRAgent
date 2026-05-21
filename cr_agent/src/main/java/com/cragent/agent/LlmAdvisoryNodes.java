@@ -2,6 +2,7 @@ package com.cragent.agent;
 
 import com.cragent.config.Settings;
 import com.cragent.llm.LlmClient;
+import com.cragent.llm.LlmTelemetry;
 import com.cragent.llm.OpenAiCompatibleClient;
 import com.cragent.model.ChatMessage;
 import com.cragent.model.ReviewResult;
@@ -24,12 +25,12 @@ public final class LlmAdvisoryNodes {
             return Map.of("enabled", false);
         }
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("target", target);
-        payload.put("triage", compact(triage));
         payload.put("instruction", """
                 Return JSON only: {"risk_level":"low|medium|high","semantic_risk_types":["..."],"review_focus":["..."],"human_attention_advice":false,"reason":"short"}.
                 This is advisory. Do not override hard rules such as docs-only, draft, large PR, or explicit human_required.
                 """);
+        payload.put("target", target);
+        payload.put("triage", compact(triage));
         return callJson(llm, trace, "triage_advice", payload, Map.of(
                 "enabled", true,
                 "risk_level", "unknown",
@@ -46,16 +47,16 @@ public final class LlmAdvisoryNodes {
             return fallbackContextScout(mode, triage, analysis, "disabled");
         }
         Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("instruction", """
+                Return JSON only: {"keywords":["..."],"symbols":["..."],"paths":["..."],"test_targets":["..."],"config_targets":["..."],"reason":"short"}.
+                You are not ranking context. Produce retrieval intents for local hybrid retrieval/RRF.
+                """);
         payload.put("mode", mode);
         payload.put("triage", compact(triage));
         payload.put("risk_model", analysis.getOrDefault("risk_model", Map.of()));
         payload.put("regression_test_reasoning", analysis.getOrDefault("regression_test_reasoning", Map.of()));
         payload.put("risk_probes", analysis.getOrDefault("risk_probes", List.of()));
         payload.put("repo_manifest", limited(analysis.getOrDefault("repo_manifest", List.of()), 80));
-        payload.put("instruction", """
-                Return JSON only: {"keywords":["..."],"symbols":["..."],"paths":["..."],"test_targets":["..."],"config_targets":["..."],"reason":"short"}.
-                You are not ranking context. Produce retrieval intents for local hybrid retrieval/RRF.
-                """);
         Map<String, Object> result = callJson(llm, trace, "context_scout", payload, fallbackContextScout(mode, triage, analysis, "llm_failed"));
         return normalizeScout(result, mode, triage, analysis);
     }
@@ -67,13 +68,13 @@ public final class LlmAdvisoryNodes {
             return baseRisk;
         }
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("triage", compact(triage));
-        payload.put("base_risk_model", baseRisk);
-        payload.put("context_summary", contextSummary(analysis));
         payload.put("instruction", """
                 Return JSON only: {"risk_level":"low|medium|high","risk_types":["..."],"review_focus":["..."],"semantic_risk_reasons":["..."],"focus_files":["..."]}.
                 Preserve concrete base risk signals and only refine/add semantic risk. Do not remove hard risk types without reason.
                 """);
+        payload.put("triage", compact(triage));
+        payload.put("base_risk_model", baseRisk);
+        payload.put("context_summary", contextSummary(analysis));
         Map<String, Object> advisory = callJson(llm, trace, "risk_refinement", payload, Map.of());
         if (advisory.isEmpty()) {
             return baseRisk;
@@ -99,15 +100,15 @@ public final class LlmAdvisoryNodes {
             return baseReasoning;
         }
         Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("instruction", """
+                Return JSON only: {"likely_test_gap":false,"missing_cases":["..."],"insufficient_existing_tests_reason":"short","files_needing_test_consideration":["..."]}.
+                Only flag concrete behavior/test gaps supported by changed behavior or risk probes.
+                """);
         payload.put("triage", compact(triage));
         payload.put("base_test_reasoning", baseReasoning);
         payload.put("risk_model", analysis.getOrDefault("risk_model", Map.of()));
         payload.put("related_tests", limited(analysis.getOrDefault("related_tests", List.of()), 30));
         payload.put("risk_probes", limited(analysis.getOrDefault("risk_probes", List.of()), 30));
-        payload.put("instruction", """
-                Return JSON only: {"likely_test_gap":false,"missing_cases":["..."],"insufficient_existing_tests_reason":"short","files_needing_test_consideration":["..."]}.
-                Only flag concrete behavior/test gaps supported by changed behavior or risk probes.
-                """);
         Map<String, Object> advisory = callJson(llm, trace, "test_gap_reasoning", payload, Map.of());
         if (advisory.isEmpty()) {
             return baseReasoning;
@@ -133,15 +134,15 @@ public final class LlmAdvisoryNodes {
             return Map.of("enabled", false);
         }
         Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("instruction", """
+                Return JSON only: {"comment":true,"update_memory":true,"create_fix_pr":false,"generate_tests":false,"reasons":["..."]}.
+                This is advisory only. The deterministic Act node enforces permissions, dry-run, and write-tool policy.
+                """);
         payload.put("repo", repo);
         payload.put("target", target);
         payload.put("triage", compact(triage));
         payload.put("analysis_summary", contextSummary(analysis));
         payload.put("issues", reviewResult.issues);
-        payload.put("instruction", """
-                Return JSON only: {"comment":true,"update_memory":true,"create_fix_pr":false,"generate_tests":false,"reasons":["..."]}.
-                This is advisory only. The deterministic Act node enforces permissions, dry-run, and write-tool policy.
-                """);
         return callJson(llm, trace, "act_plan", payload, Map.of("enabled", true, "comment", reviewResult.shouldComment,
                 "update_memory", reviewResult.shouldUpdateMemory, "create_fix_pr", reviewResult.shouldCreateFixPr,
                 "generate_tests", false, "reasons", List.of("act plan unavailable")));
@@ -162,7 +163,7 @@ public final class LlmAdvisoryNodes {
         ));
         try {
             Map<String, Object> response = llm.chatJson(messages, List.of(), 0.0);
-            trace.record("llm_response", Map.of("phase", phase, "iteration", 1, "response", response));
+            LlmTelemetry.recordResponse(trace, phase, 1, response);
             Map<String, Object> parsed = Jsons.parseMap(OpenAiCompatibleClient.assistantMessage(response).content);
             Map<String, Object> out = new LinkedHashMap<>(parsed);
             out.putIfAbsent("enabled", true);

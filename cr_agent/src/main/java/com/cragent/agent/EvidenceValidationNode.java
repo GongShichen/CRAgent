@@ -28,6 +28,7 @@ public final class EvidenceValidationNode {
         Map<String, DiffEvidence> diffEvidence = diffEvidenceByFile(triage.get("changed_files"));
         Set<String> changedFiles = diffEvidence.keySet();
         List<ReviewIssue> clean = new ArrayList<>();
+        List<ReviewIssue> memoryFiltered = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         int originalCount = input.issues.size();
         for (ReviewIssue issue : input.issues) {
@@ -67,6 +68,7 @@ public final class EvidenceValidationNode {
             }
             if (matchesFalsePositive(issue, analysis)) {
                 trace.record("issue_filtered", Map.of("reason", "false_positive_memory", "file", issue.file, "body", issue.body));
+                memoryFiltered.add(issue);
                 continue;
             }
             issue.severity = calibratedSeverity(issue, analysis);
@@ -79,6 +81,19 @@ public final class EvidenceValidationNode {
             } else {
                 trace.record("issue_filtered", Map.of("reason", "duplicate", "file", issue.file, "body", issue.body));
             }
+        }
+        if (clean.isEmpty() && !memoryFiltered.isEmpty()) {
+            memoryFiltered.stream()
+                    .filter(EvidenceValidationNode::isRecoverableMemoryFilteredIssue)
+                    .sorted((a, b) -> Double.compare(b.candidateScore, a.candidateScore))
+                    .limit(2)
+                    .forEach(issue -> {
+                        issue.validationVerdict = "DEMOTE";
+                        issue.validationReason = "False-positive memory matched, but the issue was retained because filtering would remove every candidate in this review.";
+                        issue.candidateScore = Math.max(issue.candidateScore * 0.5, isHighSignalCategory(issue) ? 0.28 : 0.2);
+                        clean.add(issue);
+                        trace.record("issue_memory_soft_restored", Map.of("file", issue.file, "body", issue.body, "candidate_score", issue.candidateScore));
+                    });
         }
         input.issues = clean;
         input.shouldComment = input.shouldComment && !clean.isEmpty();
@@ -100,6 +115,7 @@ public final class EvidenceValidationNode {
                 ? list.stream().filter(Map.class::isInstance).map(item -> (Map<String, Object>) item).toList()
                 : List.of();
         List<ReviewIssue> out = new ArrayList<>();
+        List<ReviewIssue> memoryFiltered = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         String checkText = Jsons.stringify(checks);
         for (ReviewIssue issue : input) {
@@ -108,6 +124,7 @@ public final class EvidenceValidationNode {
             }
             if (matchesFalsePositive(issue, analysis)) {
                 trace.record("issue_filtered", Map.of("reason", "false_positive_memory", "file", issue.file, "body", issue.body));
+                memoryFiltered.add(issue);
                 continue;
             }
             issue.category = normalizeCategory(issue.category);
@@ -140,6 +157,19 @@ public final class EvidenceValidationNode {
             if (seen.add(key)) {
                 out.add(issue);
             }
+        }
+        if (out.isEmpty() && !memoryFiltered.isEmpty()) {
+            memoryFiltered.stream()
+                    .filter(EvidenceValidationNode::isRecoverableMemoryFilteredIssue)
+                    .sorted((a, b) -> Double.compare(b.candidateScore, a.candidateScore))
+                    .limit(2)
+                    .forEach(issue -> {
+                        issue.validationVerdict = "DEMOTE";
+                        issue.validationReason = "False-positive memory matched, but the issue was retained because filtering would remove every candidate in this review.";
+                        issue.candidateScore = Math.max(issue.candidateScore * 0.5, isHighSignalCategory(issue) ? 0.28 : 0.2);
+                        out.add(issue);
+                        trace.record("issue_memory_soft_restored", Map.of("file", issue.file, "body", issue.body, "candidate_score", issue.candidateScore));
+                    });
         }
         trace.record("phase_end", Map.of("phase", Phase.EVIDENCE_VALIDATION.name(), "before", input.size(), "after", out.size()));
         return out;
@@ -229,6 +259,10 @@ public final class EvidenceValidationNode {
 
     private static boolean isHighSignalCategory(ReviewIssue issue) {
         return "security".equals(issue.category) || "bug".equals(issue.category) || "performance".equals(issue.category);
+    }
+
+    private static boolean isRecoverableMemoryFilteredIssue(ReviewIssue issue) {
+        return isHighSignalCategory(issue) || "tests".equals(issue.category);
     }
 
     @SuppressWarnings("unchecked")

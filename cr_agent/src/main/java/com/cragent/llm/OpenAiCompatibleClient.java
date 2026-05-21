@@ -11,14 +11,18 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 public class OpenAiCompatibleClient implements LlmClient {
     private final Settings settings;
-    private final HttpClient client = HttpClient.newHttpClient();
+    private final HttpClient client = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(30))
+            .build();
 
     public OpenAiCompatibleClient(Settings settings) {
         this.settings = settings;
@@ -42,6 +46,10 @@ public class OpenAiCompatibleClient implements LlmClient {
         payload.put("model", settings.openaiModel());
         payload.put("messages", messages.stream().map(this::messageToMap).toList());
         payload.put("temperature", temperature);
+        String thinkingMode = thinkingMode();
+        if (!thinkingMode.isBlank()) {
+            payload.put("thinking", Map.of("type", thinkingMode));
+        }
         if (tools != null && !tools.isEmpty()) {
             payload.put("tools", tools);
             payload.put("tool_choice", "auto");
@@ -52,12 +60,15 @@ public class OpenAiCompatibleClient implements LlmClient {
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(settings.openaiBaseUrl().replaceAll("/$", "") + "/chat/completions"))
+                .timeout(Duration.ofSeconds(Math.max(1, settings.llmTimeoutSeconds())))
                 .header("Authorization", "Bearer " + settings.openaiApiKey())
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(Jsons.stringify(payload)))
                 .build();
         return Retry.run("LLM request", () -> {
-            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            int timeoutSeconds = Math.max(1, settings.llmTimeoutSeconds());
+            HttpResponse<String> response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                    .get(timeoutSeconds, TimeUnit.SECONDS);
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 if (Retry.retryableStatus(response.statusCode())) {
                     throw new IOException("LLM retryable HTTP " + response.statusCode() + " " + response.body());
@@ -79,6 +90,9 @@ public class OpenAiCompatibleClient implements LlmClient {
         if (message.content != null) {
             out.put("content", message.content);
         }
+        if (message.reasoningContent != null && !message.reasoningContent.isBlank()) {
+            out.put("reasoning_content", message.reasoningContent);
+        }
         if (message.toolCalls != null) {
             out.put("tool_calls", message.toolCalls);
         }
@@ -99,8 +113,23 @@ public class OpenAiCompatibleClient implements LlmClient {
         ChatMessage out = new ChatMessage();
         out.role = "assistant";
         out.content = (String) msg.get("content");
+        out.reasoningContent = (String) msg.get("reasoning_content");
         out.toolCalls = (List<Map<String, Object>>) msg.get("tool_calls");
         return out;
+    }
+
+    private String thinkingMode() {
+        String configured = settings.llmThinkingMode() == null ? "" : settings.llmThinkingMode().trim().toLowerCase();
+        if (configured.equals("enabled") || configured.equals("disabled")) {
+            return configured;
+        }
+        if (configured.equals("auto") || configured.isBlank()) {
+            String baseUrl = settings.openaiBaseUrl() == null ? "" : settings.openaiBaseUrl().toLowerCase();
+            if (baseUrl.contains("deepseek.com")) {
+                return "disabled";
+            }
+        }
+        return "";
     }
 
     @SuppressWarnings("unchecked")

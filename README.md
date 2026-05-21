@@ -135,6 +135,11 @@ cp .env.example .env
 OPENAI_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
 OPENAI_API_KEY=replace-me
 OPENAI_MODEL=mimo-v2.5-pro
+CR_AGENT_LLM_TIMEOUT_SECONDS=300
+CR_AGENT_LLM_THINKING_MODE=auto
+# DeepSeek context cache is server-side; no extra request parameter is needed.
+# When the provider returns prompt_cache_hit_tokens / prompt_cache_miss_tokens,
+# CR-Agent records them as llm_usage trace events.
 
 # 可选。没有 token 时仍可使用本机 Git 路径或 dry-run/local flow。
 GITHUB_TOKEN=
@@ -142,6 +147,7 @@ GITHUB_TOKEN=
 CR_AGENT_DRY_RUN=true
 CR_AGENT_TRACE_DIR=data/traces
 CR_AGENT_MEMORY_DIR=data/memory
+CR_AGENT_MEMORY_READ_ENABLED=true
 CR_AGENT_REPORT_DIR=report
 CR_AGENT_MAX_ITERATIONS=30
 CR_AGENT_MAX_TOOL_RESULT_CHARS=12000
@@ -155,10 +161,14 @@ CR_AGENT_LSP_TIMEOUT_SECONDS=30
 - `OPENAI_BASE_URL`：OpenAI-compatible `/v1` base URL。
 - `OPENAI_API_KEY`：LLM API key。
 - `OPENAI_MODEL`：review 使用的模型名。
+- `CR_AGENT_LLM_TIMEOUT_SECONDS`：单次 LLM HTTP 请求超时时间；不是整轮 CR 总超时，超时后走 retry/节点降级。
+- `CR_AGENT_LLM_THINKING_MODE`：可选 `auto|enabled|disabled`。DeepSeek V4 在 `auto` 或未设置时默认发送 `thinking.disabled`，避免 tool-call 多轮协议要求额外传递 reasoning 内容导致中断。
+- DeepSeek cache：无需额外配置；agent 会保持稳定 prompt 前缀，并在 trace 的 `llm_usage` 事件中记录 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`。
 - `GITHUB_TOKEN`：GitHub API fallback 和真实 PR 写操作所需 token。
 - `CR_AGENT_DRY_RUN`：默认建议 `true`，避免直接写 GitHub。
 - `CR_AGENT_TRACE_DIR`：trace 输出目录，相对 `cr_agent/` 工作目录。
 - `CR_AGENT_MEMORY_DIR`：memory 输出目录，相对 `cr_agent/` 工作目录。
+- `CR_AGENT_MEMORY_READ_ENABLED`：是否读取历史 memory；benchmark/eval 建议设为 `false`，避免历史规则污染评测样本。
 - `CR_AGENT_REPORT_DIR`：review report 输出目录；相对路径会解析到项目根目录，默认 `report/`。
 - `CR_AGENT_MAX_ITERATIONS`：agent tool-use 最大轮数。
 - `CR_AGENT_MAX_TOOL_RESULT_CHARS`：单次工具返回最大字符数。

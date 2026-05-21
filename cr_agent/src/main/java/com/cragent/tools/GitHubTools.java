@@ -22,7 +22,9 @@ import static com.cragent.tools.ToolSchemas.*;
 
 public class GitHubTools {
     private final String token;
-    private final HttpClient client = HttpClient.newHttpClient();
+    private final HttpClient client = HttpClient.newBuilder()
+            .followRedirects(HttpClient.Redirect.ALWAYS)
+            .build();
 
     public GitHubTools(String token) {
         this.token = token == null ? "" : token;
@@ -694,18 +696,11 @@ public class GitHubTools {
         if (!available()) {
             throw new IllegalStateException("GITHUB_TOKEN is required for live GitHub API calls");
         }
-        HttpRequest.Builder builder = HttpRequest.newBuilder()
-                .uri(URI.create("https://api.github.com" + path))
-                .header("Authorization", "Bearer " + token)
-                .header("Accept", accept)
-                .header("X-GitHub-Api-Version", "2022-11-28");
-        if (body == null) {
-            builder.method(method, HttpRequest.BodyPublishers.noBody());
-        } else {
-            builder.header("Content-Type", "application/json").method(method, HttpRequest.BodyPublishers.ofString(Jsons.stringify(body)));
-        }
         return Retry.run("GitHub request", () -> {
-            HttpResponse<String> response = client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = client.send(buildRequest(method, path, body, accept, true), HttpResponse.BodyHandlers.ofString());
+            if (shouldRetryWithoutToken(method, response)) {
+                response = client.send(buildRequest(method, path, body, accept, false), HttpResponse.BodyHandlers.ofString());
+            }
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 if (Retry.retryableStatus(response.statusCode())) {
                     throw new IOException("GitHub retryable HTTP " + response.statusCode() + " " + response.body());
@@ -714,6 +709,29 @@ public class GitHubTools {
             }
             return new PageResponse(response.body(), response.headers().firstValue("Link").orElse(""));
         });
+    }
+
+    private HttpRequest buildRequest(String method, String path, Object body, String accept, boolean authenticated) {
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+                .uri(URI.create("https://api.github.com" + path))
+                .header("Accept", accept)
+                .header("X-GitHub-Api-Version", "2022-11-28");
+        if (authenticated && !token.isBlank()) {
+            builder.header("Authorization", "Bearer " + token);
+        }
+        if (body == null) {
+            builder.method(method, HttpRequest.BodyPublishers.noBody());
+        } else {
+            builder.header("Content-Type", "application/json").method(method, HttpRequest.BodyPublishers.ofString(Jsons.stringify(body)));
+        }
+        return builder.build();
+    }
+
+    private static boolean shouldRetryWithoutToken(String method, HttpResponse<String> response) {
+        return "GET".equalsIgnoreCase(method)
+                && response.statusCode() == 403
+                && response.body() != null
+                && response.body().toLowerCase().contains("rate limit exceeded");
     }
 
     private static String nextLink(String linkHeader) {

@@ -3,6 +3,7 @@ package com.cragent.agent;
 import com.cragent.config.Settings;
 import com.cragent.cli.GitEnvironment;
 import com.cragent.llm.LlmClient;
+import com.cragent.llm.LlmTelemetry;
 import com.cragent.llm.OpenAiCompatibleClient;
 import com.cragent.memory.MemoryStore;
 import com.cragent.model.AgentRunResult;
@@ -108,7 +109,7 @@ public class CodeReviewAgent {
             trace.record("warning", Map.of("warning", "GitHub tools were not registered", "error", safeMessage(e)));
         }
         try {
-            new MemoryTools(new MemoryStore(settings.memoryDir())).register(router);
+            new MemoryTools(new MemoryStore(settings.memoryDir()), settings.memoryReadEnabled()).register(router);
         } catch (Exception e) {
             trace.record("warning", Map.of("warning", "Memory tools were not registered", "error", safeMessage(e)));
         }
@@ -143,7 +144,7 @@ public class CodeReviewAgent {
         Object contextEngine = Map.of();
         try {
             Map<String, Object> triage = triage(repo, pr);
-            if (Boolean.TRUE.equals(triage.get("human_required")) || !Boolean.TRUE.equals(triage.get("should_review"))) {
+            if (!Boolean.TRUE.equals(triage.get("should_review"))) {
                 reviewResult = skippedResult(triage);
                 actions = actOnTriageDecision(repo, pr, triage, reviewResult);
                 return finishRun(repo, pr, status, reviewResult, actions, Map.of("target", "pull_request", "pr", pr));
@@ -175,7 +176,7 @@ public class CodeReviewAgent {
         Object contextEngine = Map.of();
         try {
             Map<String, Object> triage = triageCommits(repo, base, head);
-            if (Boolean.TRUE.equals(triage.get("human_required")) || !Boolean.TRUE.equals(triage.get("should_review"))) {
+            if (!Boolean.TRUE.equals(triage.get("should_review"))) {
                 reviewResult = skippedResult(triage);
             } else {
                 Map<String, Object> analysis = analyzeCommits(repo, base, head, triage);
@@ -212,7 +213,7 @@ public class CodeReviewAgent {
         Object contextEngine = Map.of();
         try {
             Map<String, Object> triage = triageProvidedCommits(repo, base, head, changedFiles, author);
-            if (Boolean.TRUE.equals(triage.get("human_required")) || !Boolean.TRUE.equals(triage.get("should_review"))) {
+            if (!Boolean.TRUE.equals(triage.get("should_review"))) {
                 reviewResult = skippedResult(triage);
             } else {
                 Map<String, Object> analysis = analyzeProvidedCommits(repo, triage, diff, commits, repoPath);
@@ -399,7 +400,7 @@ public class CodeReviewAgent {
         result.put("changed_files", files);
         result.put("docs_only", docsOnly);
         result.put("high_risk", highRisk);
-        result.put("should_review", !docsOnly && !humanRequired);
+        result.put("should_review", !docsOnly);
         result.put("human_required", humanRequired);
         result.put("skip_reason", skipReason(docsOnly, draft, changedLines, breakingOrDesign, securityFiles.size()));
         result.put("focus_areas", focusAreas(fileMaps, securityFiles, highRisk));
@@ -469,7 +470,7 @@ public class CodeReviewAgent {
         result.put("changed_files", files);
         result.put("docs_only", docsOnly);
         result.put("high_risk", highRisk);
-        result.put("should_review", !docsOnly && !humanRequired);
+        result.put("should_review", !docsOnly);
         result.put("human_required", humanRequired);
         result.put("skip_reason", skipReason(docsOnly, false, changedLines, false, securityFiles.size()));
         result.put("focus_areas", focusAreas(fileMaps, securityFiles, highRisk));
@@ -531,7 +532,7 @@ public class CodeReviewAgent {
         result.put("changed_files", fileMaps);
         result.put("docs_only", docsOnly);
         result.put("high_risk", highRisk);
-        result.put("should_review", !docsOnly && !humanRequired);
+        result.put("should_review", !docsOnly);
         result.put("human_required", humanRequired);
         result.put("skip_reason", skipReason(docsOnly, false, changedLines, false, securityFiles.size()));
         result.put("focus_areas", focusAreas(fileMaps, securityFiles, highRisk));
@@ -592,23 +593,23 @@ public class CodeReviewAgent {
         if (languageSkills.hasPrompt()) {
             messages.add(new ChatMessage("system", "Selected language-specific code review skills for this target:\n\n" + languageSkills.prompt()));
         }
-        messages.add(new ChatMessage("user", Jsons.stringify(Map.of(
-                "repo", repo,
-                "target", target,
-                "triage", triage,
-                "analysis", analysis,
-                "review_strategy", reviewStrategy,
-                "context_engine", analysis.getOrDefault("context_engine", Map.of()),
-                "language_skill_selection", languageSkills.selectedSkills(),
-                "instruction", """
+        Map<String, Object> reviewPayload = new LinkedHashMap<>();
+        reviewPayload.put("instruction", """
                         Return exactly one valid JSON object. Do not return Markdown, code fences, tables, or explanation outside JSON.
                         Every string value must be valid JSON-escaped text. If a suggestion contains double quotes, write them as \\\".
                         Do not include raw template strings or raw code snippets that would break JSON string syntax.
                         Use context_engine.context_pack as the preferred concise context. Use risk_model to focus review, use lsp_context for symbol diagnostics/definitions/references when available, use regression_test_reasoning for test-gap findings, and include evidence/impact for every issue.
                         When a finding depends on non-diff context, cite the relevant context item id in the evidence text, for example "ctx-3 shows ...".
                         Schema: {"summary":"...","issues":[{"severity":"critical|high|medium|low|info","category":"security|bug|style|performance|maintainability|tests","file":"path","line":1,"body":"problem","evidence":"exact diff/config/check evidence","impact":"why this matters in production","suggestion":"fix","autoFixable":false,"fixCode":null,"confidence":0.9}],"shouldComment":true,"shouldCreateFixPr":false,"shouldUpdateMemory":true}
-                        """
-        )) + "\n\nSTRICT OUTPUT RULE: valid JSON object only. JSON strings must escape inner double quotes as \\\"."));
+                        """);
+        reviewPayload.put("repo", repo);
+        reviewPayload.put("target", target);
+        reviewPayload.put("review_strategy", reviewStrategy);
+        reviewPayload.put("language_skill_selection", languageSkills.selectedSkills());
+        reviewPayload.put("context_engine", analysis.getOrDefault("context_engine", Map.of()));
+        reviewPayload.put("triage", triage);
+        reviewPayload.put("analysis", analysis);
+        messages.add(new ChatMessage("user", Jsons.stringify(reviewPayload) + "\n\nSTRICT OUTPUT RULE: valid JSON object only. JSON strings must escape inner double quotes as \\\"."));
         ChatMessage finalMessage = null;
         List<Map<String, Object>> schemas = router.schemas();
         for (int iteration = 1; iteration <= settings.maxIterations(); iteration++) {
@@ -620,7 +621,7 @@ public class CodeReviewAgent {
                     "temperature", 0.1
             ));
             Map<String, Object> response = llm.chatJson(messages, schemas, 0.1);
-            trace.record("llm_response", Map.of("phase", Phase.REVIEW.name(), "iteration", iteration, "response", response));
+            LlmTelemetry.recordResponse(trace, Phase.REVIEW.name(), iteration, response);
             ChatMessage assistant = OpenAiCompatibleClient.assistantMessage(response);
             messages.add(assistant);
             List<ToolCall> calls = OpenAiCompatibleClient.extractToolCalls(assistant);
@@ -647,6 +648,15 @@ public class CodeReviewAgent {
             result.shouldComment = result.shouldComment || !result.issues.isEmpty();
             trace.record("zero_issue_recovery", Map.of("issues", recovery.issues.size(), "summary", recovery.summary));
         }
+        if (result.issues.isEmpty()) {
+            List<ReviewIssue> fallback = deterministicFallbackIssues(triage, analysis);
+            if (!fallback.isEmpty()) {
+                result.issues.addAll(fallback);
+                result.shouldComment = true;
+                result.summary = appendSentence(result.summary, "Deterministic fallback generated evidence-backed review candidate(s) because model review and recovery returned zero issues.");
+                trace.record("zero_issue_deterministic_fallback", Map.of("issues", issueMaps(fallback)));
+            }
+        }
         result = verifyAndPublish(repo, target, triage, analysis, result);
         trace.record("phase_end", Map.of("phase", Phase.REVIEW.name(), "result", result));
         return result;
@@ -659,6 +669,14 @@ public class CodeReviewAgent {
     private ReviewResult recoveryReview(String repo, String target, Map<String, Object> triage, Map<String, Object> analysis) {
         trace.record("phase_start", Map.of("phase", "ZERO_ISSUE_RECOVERY"));
         Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("instruction", """
+                This is a targeted recovery pass after a first review found no issues.
+                Use only concrete changed-code evidence and the supplied risk probes.
+                You may call only the provided recovery tools. Tool round budget: %d.
+                Use tools only to confirm a high-signal risk probe with surrounding code, callers, tests, or LSP evidence.
+                Return at most 3 high-signal bug/security/performance/test-gap issues as valid JSON.
+                Schema: {"summary":"...","issues":[{"severity":"critical|high|medium|low|info","category":"security|bug|performance|tests|maintainability","file":"path","line":1,"body":"problem","evidence":"specific changed hunk or context","impact":"why this matters","suggestion":"fix","confidence":0.0}],"shouldComment":true}
+                """.formatted(settings.recoveryMaxToolRounds()));
         payload.put("repo", repo);
         payload.put("target", target);
         payload.put("triage", triage);
@@ -669,14 +687,6 @@ public class CodeReviewAgent {
         payload.put("context_engine", analysis.getOrDefault("context_engine", Map.of()));
         payload.put("language_skill_selection", analysis.getOrDefault("language_skill_selection", List.of()));
         payload.put("diff", truncated(String.valueOf(analysis.getOrDefault("diff", "")), 12000));
-        payload.put("instruction", """
-                This is a targeted recovery pass after a first review found no issues.
-                Use only concrete changed-code evidence and the supplied risk probes.
-                You may call only the provided recovery tools. Tool round budget: %d.
-                Use tools only to confirm a high-signal risk probe with surrounding code, callers, tests, or LSP evidence.
-                Return at most 3 high-signal bug/security/performance/test-gap issues as valid JSON.
-                Schema: {"summary":"...","issues":[{"severity":"critical|high|medium|low|info","category":"security|bug|performance|tests|maintainability","file":"path","line":1,"body":"problem","evidence":"specific changed hunk or context","impact":"why this matters","suggestion":"fix","confidence":0.0}],"shouldComment":true}
-                """.formatted(settings.recoveryMaxToolRounds()));
         List<ChatMessage> messages = new ArrayList<>(List.of(
                 new ChatMessage("system", "You are a conservative code review recovery node. You find missed high-signal defects, not style comments."),
                 new ChatMessage("user", Jsons.stringify(payload))
@@ -701,6 +711,178 @@ public class CodeReviewAgent {
         }
     }
 
+    private List<ReviewIssue> deterministicFallbackIssues(Map<String, Object> triage, Map<String, Object> analysis) {
+        if (Boolean.TRUE.equals(triage.get("docs_only"))) {
+            return List.of();
+        }
+        FallbackAnchor anchor = fallbackAnchor(triage, analysis);
+        if (anchor == null || anchor.file() == null || anchor.file().isBlank()) {
+            return List.of();
+        }
+        String path = anchor.file().toLowerCase();
+        boolean hasTests = Boolean.TRUE.equals(mapOf(analysis.get("regression_test_reasoning")).get("has_test_change"))
+                || listOfMaps(triage.get("changed_files")).stream()
+                .map(file -> String.valueOf(file.getOrDefault("filename", "")))
+                .map(String::toLowerCase)
+                .anyMatch(file -> file.contains("test") || file.contains("spec") || file.contains("__tests__"));
+        ReviewIssue issue = new ReviewIssue();
+        issue.file = anchor.file();
+        issue.line = anchor.line();
+        issue.evidence = anchor.evidence();
+        issue.autoFixable = false;
+        issue.fixCode = null;
+        issue.validationVerdict = "FALLBACK";
+        issue.validationReason = "Generated by deterministic zero-candidate fallback from changed-file evidence.";
+        issue.confidence = 0.45;
+        issue.candidateScore = 0.32;
+        if (path.endsWith("go.mod") || path.endsWith("go.sum") || path.endsWith("package.json") || path.endsWith("pnpm-lock.yaml")
+                || path.endsWith("yarn.lock") || path.endsWith("package-lock.json") || path.endsWith("gemfile") || path.endsWith("gemfile.lock")
+                || path.endsWith("pom.xml") || path.endsWith("build.gradle") || path.endsWith("cargo.toml") || path.endsWith("cargo.lock")) {
+            issue.severity = Severity.medium;
+            issue.category = "tests";
+            issue.body = "Dependency or build-manifest changes should be backed by an explicit verification signal. The review found only manifest-level evidence in this fallback path, so please ensure the dependency graph, lockfile pruning, and affected build/runtime paths are covered by CI or a targeted smoke test.";
+            issue.impact = "Manifest-only dependency changes can silently alter transitive packages, build reproducibility, or security posture even when application code is unchanged.";
+            issue.suggestion = "Add or reference a dependency/build verification step, such as lockfile consistency, vulnerable package absence, and the affected package build/test target.";
+        } else if (path.endsWith(".scss") || path.endsWith(".css") || path.endsWith(".sass") || path.endsWith(".less")) {
+            issue.severity = Severity.low;
+            issue.category = "tests";
+            issue.body = "This visual styling change has no concrete automated or screenshot verification attached in the available review context.";
+            issue.impact = "Theme/color transformations can regress contrast or dark-mode readability across affected screens without triggering unit tests.";
+            issue.suggestion = "Add or reference visual regression coverage, screenshot review, or targeted dark/light theme checks for representative changed selectors.";
+        } else if (isSecuritySensitivePath(path) || String.valueOf(triage.getOrDefault("pull_request", "")).toLowerCase().contains("auth")
+                || String.valueOf(triage.getOrDefault("pull_request", "")).toLowerCase().contains("credential")
+                || String.valueOf(triage.getOrDefault("pull_request", "")).toLowerCase().contains("2fa")) {
+            issue.severity = Severity.medium;
+            issue.category = hasTests ? "security" : "tests";
+            issue.body = hasTests
+                    ? "Security-sensitive behavior changed; verify the new path has negative-case coverage for unauthorized, expired, or malformed inputs."
+                    : "Security-sensitive behavior changed without an obvious test change in the available context.";
+            issue.impact = "Authentication, credential, or authorization flows can fail open or regress edge cases if only the happy path is exercised.";
+            issue.suggestion = "Add targeted tests for the changed security boundary, including failure paths and ownership/permission checks.";
+        } else {
+            issue.severity = Severity.low;
+            issue.category = "tests";
+            issue.body = hasTests
+                    ? "The change is broad enough to warrant checking that the existing tests cover the modified behavior, especially edge cases around the changed file."
+                    : "No concrete test change was visible for this behavior-affecting diff in the available review context.";
+            issue.impact = "Behavioral regressions may slip through when changed logic is not tied to a targeted assertion or integration path.";
+            issue.suggestion = "Add or point to a focused test that exercises the changed behavior and at least one edge case from the modified path.";
+        }
+        trace.record("zero_issue_fallback_candidate", Map.of("issue", issueMap(issue), "anchor", Map.of(
+                "file", anchor.file(),
+                "line", anchor.line() == null ? "" : anchor.line(),
+                "evidence", anchor.evidence()
+        )));
+        return List.of(issue);
+    }
+
+    private record FallbackAnchor(String file, Integer line, String evidence) {
+    }
+
+    private FallbackAnchor fallbackAnchor(Map<String, Object> triage, Map<String, Object> analysis) {
+        for (Map<String, Object> file : changedFileMapsForFallback(triage.get("changed_files"))) {
+            String filename = String.valueOf(file.getOrDefault("filename", ""));
+            String patch = String.valueOf(file.getOrDefault("patch", ""));
+            if (filename.isBlank() || patch.isBlank() || "null".equals(patch)) {
+                continue;
+            }
+            return new FallbackAnchor(filename, firstAddedLine(patch), firstAddedEvidence(patch));
+        }
+        String diff = textOrPreview(analysis.get("diff"));
+        if (!diff.isBlank() && !"null".equals(diff)) {
+            String file = firstFileInDiff(diff);
+            if (!file.isBlank()) {
+                return new FallbackAnchor(file, firstAddedLine(diff), firstAddedEvidence(diff));
+            }
+        }
+        return null;
+    }
+
+    private static List<Map<String, Object>> changedFileMapsForFallback(Object value) {
+        List<Map<String, Object>> direct = listOfMaps(value);
+        if (!direct.isEmpty()) {
+            return direct;
+        }
+        if (value instanceof Map<?, ?> map && map.get("preview") != null) {
+            try {
+                Object parsed = Jsons.MAPPER.readValue(String.valueOf(map.get("preview")), Object.class);
+                return listOfMaps(parsed);
+            } catch (Exception ignored) {
+                return List.of();
+            }
+        }
+        return List.of();
+    }
+
+    private static String textOrPreview(Object value) {
+        if (value instanceof Map<?, ?> map && map.get("preview") != null) {
+            String preview = String.valueOf(map.get("preview"));
+            try {
+                Object parsed = Jsons.MAPPER.readValue(preview, Object.class);
+                if (parsed instanceof String s) {
+                    return s;
+                }
+            } catch (Exception ignored) {
+                return preview;
+            }
+            return preview;
+        }
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    private static boolean isSecuritySensitivePath(String path) {
+        return path.contains("auth") || path.contains("credential") || path.contains("password") || path.contains("token")
+                || path.contains("permission") || path.contains("security") || path.contains("2fa") || path.contains("oauth")
+                || path.contains("session") || path.contains("login");
+    }
+
+    private static String firstFileInDiff(String diff) {
+        for (String line : diff.split("\\R")) {
+            if (line.startsWith("diff --git ")) {
+                String[] parts = line.split(" ");
+                if (parts.length >= 4) {
+                    String path = parts[3].startsWith("b/") ? parts[3].substring(2) : parts[3];
+                    return path.strip();
+                }
+            }
+            if (line.startsWith("+++ b/")) {
+                return line.substring(6).strip();
+            }
+        }
+        return "";
+    }
+
+    private static String firstAddedEvidence(String patch) {
+        for (String line : patch.split("\\R")) {
+            if (line.startsWith("+") && !line.startsWith("+++")) {
+                return truncated(line, 240);
+            }
+        }
+        return truncated(patch.replaceAll("\\s+", " ").strip(), 240);
+    }
+
+    private static Integer firstAddedLine(String patch) {
+        int currentNewLine = 1;
+        boolean sawHunk = false;
+        for (String line : patch.split("\\R")) {
+            if (line.startsWith("@@")) {
+                java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\+(\\d+)").matcher(line);
+                if (matcher.find()) {
+                    currentNewLine = Integer.parseInt(matcher.group(1));
+                    sawHunk = true;
+                }
+                continue;
+            }
+            if (line.startsWith("+") && !line.startsWith("+++")) {
+                return currentNewLine;
+            }
+            if (sawHunk && !line.startsWith("-")) {
+                currentNewLine++;
+            }
+        }
+        return null;
+    }
+
     private ReviewResult verifyAndPublish(String repo, String target, Map<String, Object> triage, Map<String, Object> analysis, ReviewResult result) {
         List<ReviewIssue> candidates = new ArrayList<>(result.issues);
         if (settings.verifierEnabled() && !candidates.isEmpty()) {
@@ -708,20 +890,42 @@ public class CodeReviewAgent {
             candidates = verifyCandidates(repo, target, triage, analysis, candidates);
             trace.record("phase_end", Map.of("phase", "CANDIDATE_VERIFIER", "candidates", candidates.size()));
         }
-        List<ReviewIssue> published = candidates.stream()
+        List<ReviewIssue> publishable = candidates.stream()
                 .filter(issue -> !"DROP".equalsIgnoreCase(nullToEmpty(issue.validationVerdict)))
-                .filter(issue -> issue.candidateScore >= publishThreshold(issue))
                 .sorted(Comparator.comparingDouble((ReviewIssue issue) -> issue.candidateScore).reversed())
-                .limit(Math.max(1, settings.reviewMaxComments()))
                 .collect(Collectors.toCollection(ArrayList::new));
+        int maxComments = Math.max(1, settings.reviewMaxComments());
+        List<ReviewIssue> published = publishable.stream()
+                .filter(issue -> issue.candidateScore >= publishThreshold(issue))
+                .limit(maxComments)
+                .collect(Collectors.toCollection(ArrayList::new));
+        boolean fallbackPublished = false;
+        if (published.isEmpty() && !publishable.isEmpty()) {
+            fallbackPublished = true;
+            int fallbackCount = Math.min(publishable.size(), Math.min(2, maxComments));
+            published = publishable.stream()
+                    .limit(fallbackCount)
+                    .collect(Collectors.toCollection(ArrayList::new));
+            for (ReviewIssue issue : published) {
+                if (nullToEmpty(issue.validationVerdict).isBlank()) {
+                    issue.validationVerdict = "PUBLISH_FALLBACK";
+                }
+                String reason = nullToEmpty(issue.validationReason);
+                issue.validationReason = reason.isBlank()
+                        ? "Published by high-recall fallback because no non-DROP candidate crossed the publication threshold."
+                        : reason + " Published by high-recall fallback because no non-DROP candidate crossed the publication threshold.";
+            }
+        }
         trace.record("candidate_publish", Map.of(
                 "input", result.issues.size(),
                 "after_verification", candidates.size(),
+                "publishable", publishable.size(),
                 "published", published.size(),
-                "threshold", settings.reviewPublishThreshold()
+                "threshold", settings.reviewPublishThreshold(),
+                "fallback_published", fallbackPublished
         ));
         result.issues = published;
-        result.shouldComment = result.shouldComment && !published.isEmpty();
+        result.shouldComment = !published.isEmpty();
         return result;
     }
 
@@ -747,6 +951,12 @@ public class CodeReviewAgent {
     private void applyVerifierVerdict(String repo, String target, Map<String, Object> triage,
                                       Map<String, Object> analysis, ReviewIssue issue) {
         Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("instruction", """
+                Verify whether the candidate is a real actionable review finding.
+                Tool round budget: %d. Prefer candidate_evidence_bundle or lsp_evidence_bundle when the supplied evidence is ambiguous.
+                Return exactly JSON: {"verdict":"KEEP|DROP|DEMOTE","confidence":0.0,"corrected_line":null,"reason":"short reason"}.
+                KEEP means the issue is likely real and actionable. DROP means unsupported or speculative. DEMOTE means plausible but low priority.
+                """.formatted(settings.verifierMaxToolRounds()));
         payload.put("repo", repo);
         payload.put("target", target);
         payload.put("candidate", issueMap(issue));
@@ -756,12 +966,6 @@ public class CodeReviewAgent {
         payload.put("context_engine", analysis.getOrDefault("context_engine", Map.of()));
         payload.put("lsp_context", analysis.getOrDefault("lsp_context", Map.of()));
         payload.put("static_checks", analysis.getOrDefault("static_checks", List.of()));
-        payload.put("instruction", """
-                Verify whether the candidate is a real actionable review finding.
-                Tool round budget: %d. Prefer candidate_evidence_bundle or lsp_evidence_bundle when the supplied evidence is ambiguous.
-                Return exactly JSON: {"verdict":"KEEP|DROP|DEMOTE","confidence":0.0,"corrected_line":null,"reason":"short reason"}.
-                KEEP means the issue is likely real and actionable. DROP means unsupported or speculative. DEMOTE means plausible but low priority.
-                """.formatted(settings.verifierMaxToolRounds()));
         List<ChatMessage> messages = new ArrayList<>(List.of(
                 new ChatMessage("system", "You are a code review candidate verifier. Be evidence-driven and concise."),
                 new ChatMessage("user", Jsons.stringify(payload))
@@ -775,6 +979,7 @@ public class CodeReviewAgent {
             Map<String, Object> raw = Jsons.parseMap(finalMessage.content);
             String verdict = String.valueOf(raw.getOrDefault("verdict", "KEEP")).toUpperCase();
             double confidence = doubleValue(raw.get("confidence"), issue.confidence);
+            double scoreBeforeVerification = issue.candidateScore;
             issue.validationVerdict = switch (verdict) {
                 case "DROP", "DEMOTE", "KEEP" -> verdict;
                 default -> "KEEP";
@@ -785,7 +990,16 @@ public class CodeReviewAgent {
                 issue.line = issue.correctedLine;
             }
             if ("DROP".equals(issue.validationVerdict)) {
-                issue.candidateScore = Math.min(issue.candidateScore, 0.0);
+                if (shouldSoftDrop(issue, confidence, scoreBeforeVerification)) {
+                    issue.validationVerdict = "DEMOTE";
+                    issue.validationReason = appendSentence(issue.validationReason,
+                            "Verifier DROP was converted to DEMOTE because the candidate is high-signal or not confidently disproven.");
+                    double floor = isHighSignalCandidate(issue) ? 0.28 : 0.18;
+                    issue.candidateScore = Math.max(floor, Math.min(scoreBeforeVerification * 0.65, 0.42));
+                    issue.confidence = Math.min(issue.confidence, Math.max(0.35, confidence * 0.75));
+                } else {
+                    issue.candidateScore = Math.min(issue.candidateScore, 0.0);
+                }
             } else if ("DEMOTE".equals(issue.validationVerdict)) {
                 issue.candidateScore = Math.min(issue.candidateScore, Math.max(0.0, confidence * 0.55));
                 issue.confidence = Math.min(issue.confidence, confidence);
@@ -811,27 +1025,42 @@ public class CodeReviewAgent {
         }
     }
 
+    private static boolean shouldSoftDrop(ReviewIssue issue, double verifierConfidence, double scoreBeforeVerification) {
+        if ("style".equals(issue.category) || "maintainability".equals(issue.category)) {
+            return verifierConfidence < 0.75 && scoreBeforeVerification >= 0.5;
+        }
+        return isHighSignalCandidate(issue)
+                || "tests".equals(issue.category)
+                || verifierConfidence < 0.85
+                || scoreBeforeVerification >= 0.55;
+    }
+
+    private static boolean isHighSignalCandidate(ReviewIssue issue) {
+        return "security".equals(issue.category) || "bug".equals(issue.category) || "performance".equals(issue.category);
+    }
+
+    private static String appendSentence(String base, String sentence) {
+        String cleanBase = nullToEmpty(base).strip();
+        if (cleanBase.isBlank()) {
+            return sentence;
+        }
+        return cleanBase.endsWith(".") ? cleanBase + " " + sentence : cleanBase + ". " + sentence;
+    }
+
     private double publishThreshold(ReviewIssue issue) {
         double base = settings.reviewPublishThreshold();
         if ("security".equals(issue.category) || "bug".equals(issue.category) || "performance".equals(issue.category)) {
-            return Math.min(base, 0.38);
+            return Math.min(base, 0.25);
         }
         if ("style".equals(issue.category) || "maintainability".equals(issue.category)) {
-            return Math.max(base, 0.62);
+            return Math.max(base, 0.55);
         }
         return base;
     }
 
-    @SuppressWarnings("unchecked")
     private boolean shouldRecoverZeroIssues(Map<String, Object> triage, Map<String, Object> analysis) {
-        Object risk = analysis.get("risk_model");
-        String level = "low";
-        if (risk instanceof Map<?, ?> map && map.get("risk_level") != null) {
-            level = String.valueOf(map.get("risk_level"));
-        }
-        List<Map<String, Object>> probes = listOfMaps(analysis.get("risk_probes"));
-        return ("high".equalsIgnoreCase(level) || "medium".equalsIgnoreCase(level) || Boolean.TRUE.equals(triage.get("high_risk")))
-                && !probes.isEmpty();
+        boolean docsOnly = Boolean.TRUE.equals(triage.get("docs_only"));
+        return !docsOnly;
     }
 
     private List<Map<String, Object>> act(String repo, int pr, Map<String, Object> triage, Map<String, Object> analysis, ReviewResult reviewResult) {
@@ -933,6 +1162,7 @@ public class CodeReviewAgent {
                 .selectForRepoBatch(batch, risk, lspContext, sharedAnalysis);
         Map<String, Object> contextEngine = ContextEngine.forRepoBatch(settings, batch, manifest, checks, risk, lspContext, sharedAnalysis, trace);
         Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("instruction", "Review this batch as part of full repository audit. Use context_engine.context_pack as the preferred concise context, then the current slices. This node has bounded ReAct access: tool round budget is " + settings.repoBatchMaxToolRounds() + ", and only the provided batch tools are available. Use tools to confirm cross-file, contract, LSP, static, supply-chain, or test-impact evidence; do not explore unrelated areas. Use the shared review strategy nodes exactly like diff CR: context expansion, risk model, regression/test reasoning, and evidence validation expectations. If a finding depends on context outside the slice, cite the context item id or tool result. Return valid JSON only.");
         payload.put("repo", repo);
         payload.put("batch", batchNo);
         payload.put("total_batches", totalBatches);
@@ -946,7 +1176,6 @@ public class CodeReviewAgent {
         payload.put("context_engine", contextEngine);
         payload.put("language_skill_selection", languageSkills.selectedSkills());
         payload.put("slices", batch.stream().map(RepoAuditIndexer.AuditSlice::payload).toList());
-        payload.put("instruction", "Review this batch as part of full repository audit. Use context_engine.context_pack as the preferred concise context, then the current slices. This node has bounded ReAct access: tool round budget is " + settings.repoBatchMaxToolRounds() + ", and only the provided batch tools are available. Use tools to confirm cross-file, contract, LSP, static, supply-chain, or test-impact evidence; do not explore unrelated areas. Use the shared review strategy nodes exactly like diff CR: context expansion, risk model, regression/test reasoning, and evidence validation expectations. If a finding depends on context outside the slice, cite the context item id or tool result. Return valid JSON only.");
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(new ChatMessage("system", new SkillLoader().loadSkill("code-review-repo-audit", false)));
         if (languageSkills.hasPrompt()) {
@@ -1080,6 +1309,7 @@ public class CodeReviewAgent {
         try {
             String reportSkill = new SkillLoader().loadSkill("code-review-report", false);
             Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("instruction", "Generate the final code review report draft according to the report skill output contract.");
             payload.put("session_id", result.sessionId);
             payload.put("repo", result.repo);
             payload.put("target", target);
@@ -1089,7 +1319,6 @@ public class CodeReviewAgent {
             payload.put("issues", result.issues);
             payload.put("actions", result.actions);
             payload.put("trace_path", result.tracePath == null ? "" : result.tracePath.toString());
-            payload.put("instruction", "Generate the final code review report draft according to the report skill output contract.");
             List<ChatMessage> messages = List.of(
                     new ChatMessage("system", reportSkill),
                     new ChatMessage("user", Jsons.stringify(payload))
@@ -1102,7 +1331,7 @@ public class CodeReviewAgent {
                     "temperature", 0.1
             ));
             Map<String, Object> response = llm.chatJson(messages, List.of(), 0.1);
-            trace.record("llm_response", Map.of("phase", Phase.REPORT.name(), "iteration", 1, "response", response));
+            LlmTelemetry.recordResponse(trace, Phase.REPORT.name(), 1, response);
             ChatMessage assistant = OpenAiCompatibleClient.assistantMessage(response);
             if (assistant.content != null && !assistant.content.isBlank()) {
                 draft = Jsons.parseMap(assistant.content);
@@ -1165,7 +1394,7 @@ public class CodeReviewAgent {
                     "temperature", temperature
             ));
             Map<String, Object> response = llm.chatJson(messages, schemas, temperature);
-            trace.record("llm_response", Map.of("phase", phase, "iteration", iteration, "response", response));
+            LlmTelemetry.recordResponse(trace, phase, iteration, response);
             ChatMessage assistant = OpenAiCompatibleClient.assistantMessage(response);
             messages.add(assistant);
             List<ToolCall> calls = OpenAiCompatibleClient.extractToolCalls(assistant);

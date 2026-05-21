@@ -12,10 +12,13 @@ public record Settings(
         String openaiBaseUrl,
         String openaiApiKey,
         String openaiModel,
+        String llmThinkingMode,
+        int llmTimeoutSeconds,
         String githubToken,
         boolean dryRun,
         Path traceDir,
         Path memoryDir,
+        boolean memoryReadEnabled,
         Path reportDir,
         int maxIterations,
         int maxToolResultChars,
@@ -43,9 +46,9 @@ public record Settings(
     public Settings(String openaiBaseUrl, String openaiApiKey, String openaiModel, String githubToken,
                     boolean dryRun, Path traceDir, Path memoryDir, Path reportDir, int maxIterations,
                     int maxToolResultChars, boolean repoAuditRunChecks, boolean lspEnabled, int lspTimeoutSeconds) {
-        this(openaiBaseUrl, openaiApiKey, openaiModel, githubToken, dryRun, traceDir, memoryDir, reportDir,
+        this(openaiBaseUrl, openaiApiKey, openaiModel, "", 300, githubToken, dryRun, traceDir, memoryDir, true, reportDir,
                 maxIterations, maxToolResultChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds,
-                true, 8, 6, 0.45, true, true, 6, 6, 4, 6,
+                true, 8, 12, 0.25, true, true, 6, 6, 4, 6,
                 true, true, true, true, false, 60, 40);
     }
 
@@ -68,7 +71,7 @@ public record Settings(
     }
 
     public Settings withDryRun(boolean value) {
-        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, githubToken, value, traceDir, memoryDir, reportDir,
+        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, llmThinkingMode, llmTimeoutSeconds, githubToken, value, traceDir, memoryDir, memoryReadEnabled, reportDir,
                 maxIterations, maxToolResultChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds,
                 verifierEnabled, verifierMaxCandidates, reviewMaxComments, reviewPublishThreshold, zeroIssueRecovery,
                 languageSkillsEnabled, languageSkillMaxSelected, recoveryMaxToolRounds, verifierMaxToolRounds, repoBatchMaxToolRounds,
@@ -76,7 +79,7 @@ public record Settings(
     }
 
     public Settings withTraceDir(Path value) {
-        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, githubToken, dryRun, value, memoryDir, reportDir,
+        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, llmThinkingMode, llmTimeoutSeconds, githubToken, dryRun, value, memoryDir, memoryReadEnabled, reportDir,
                 maxIterations, maxToolResultChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds,
                 verifierEnabled, verifierMaxCandidates, reviewMaxComments, reviewPublishThreshold, zeroIssueRecovery,
                 languageSkillsEnabled, languageSkillMaxSelected, recoveryMaxToolRounds, verifierMaxToolRounds, repoBatchMaxToolRounds,
@@ -84,7 +87,7 @@ public record Settings(
     }
 
     public Settings withVerifierEnabled(boolean value) {
-        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, githubToken, dryRun, traceDir, memoryDir, reportDir,
+        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, llmThinkingMode, llmTimeoutSeconds, githubToken, dryRun, traceDir, memoryDir, memoryReadEnabled, reportDir,
                 maxIterations, maxToolResultChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds,
                 value, verifierMaxCandidates, reviewMaxComments, reviewPublishThreshold, zeroIssueRecovery,
                 languageSkillsEnabled, languageSkillMaxSelected, recoveryMaxToolRounds, verifierMaxToolRounds, repoBatchMaxToolRounds,
@@ -96,10 +99,13 @@ public record Settings(
                 env.getOrDefault("OPENAI_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1"),
                 env.getOrDefault("OPENAI_API_KEY", ""),
                 env.getOrDefault("OPENAI_MODEL", "mimo-v2.5-pro"),
+                env.getOrDefault("CR_AGENT_LLM_THINKING_MODE", ""),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_LLM_TIMEOUT_SECONDS", "300")),
                 env.getOrDefault("GITHUB_TOKEN", ""),
                 Boolean.parseBoolean(env.getOrDefault("CR_AGENT_DRY_RUN", "true")),
                 Path.of(env.getOrDefault("CR_AGENT_TRACE_DIR", "data/traces")),
                 Path.of(env.getOrDefault("CR_AGENT_MEMORY_DIR", "data/memory")),
+                Boolean.parseBoolean(env.getOrDefault("CR_AGENT_MEMORY_READ_ENABLED", "true")),
                 resolveRepoPath(env.getOrDefault("CR_AGENT_REPORT_DIR", "report")),
                 Integer.parseInt(env.getOrDefault("CR_AGENT_MAX_ITERATIONS", "30")),
                 Integer.parseInt(env.getOrDefault("CR_AGENT_MAX_TOOL_RESULT_CHARS", "12000")),
@@ -108,8 +114,8 @@ public record Settings(
                 Integer.parseInt(env.getOrDefault("CR_AGENT_LSP_TIMEOUT_SECONDS", "30")),
                 Boolean.parseBoolean(env.getOrDefault("CR_AGENT_VERIFIER_ENABLED", "true")),
                 Integer.parseInt(env.getOrDefault("CR_AGENT_VERIFIER_MAX_CANDIDATES", "8")),
-                Integer.parseInt(env.getOrDefault("CR_AGENT_REVIEW_MAX_COMMENTS", "6")),
-                Double.parseDouble(env.getOrDefault("CR_AGENT_REVIEW_PUBLISH_THRESHOLD", "0.45")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_REVIEW_MAX_COMMENTS", "12")),
+                Double.parseDouble(env.getOrDefault("CR_AGENT_REVIEW_PUBLISH_THRESHOLD", "0.25")),
                 Boolean.parseBoolean(env.getOrDefault("CR_AGENT_ZERO_ISSUE_RECOVERY", "true")),
                 Boolean.parseBoolean(env.getOrDefault("CR_AGENT_LANGUAGE_SKILLS_ENABLED", "true")),
                 Integer.parseInt(env.getOrDefault("CR_AGENT_LANGUAGE_SKILL_MAX_SELECTED", "6")),

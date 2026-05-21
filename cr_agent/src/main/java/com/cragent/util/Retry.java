@@ -6,6 +6,7 @@ import java.net.SocketTimeoutException;
 import java.net.http.HttpTimeoutException;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeoutException;
 import javax.net.ssl.SSLException;
 
 public final class Retry {
@@ -47,7 +48,8 @@ public final class Retry {
                     || current instanceof SSLException
                     || current instanceof HttpTimeoutException
                     || current instanceof SocketTimeoutException
-                    || current instanceof ConnectException) {
+                    || current instanceof ConnectException
+                    || current instanceof TimeoutException) {
                 return true;
             }
             current = current.getCause();

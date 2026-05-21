@@ -449,6 +449,21 @@ class JavaAgentTest {
     }
 
     @Test
+    void memoryReadCanBeDisabledForEvaluation() {
+        MemoryStore store = new MemoryStore(tmp.resolve("memory-disabled"));
+        MemoryTools writer = new MemoryTools(store);
+        writer.memoryAddFalsePositive(Map.of("pattern", "known fp", "reason", "test"));
+
+        MemoryTools disabled = new MemoryTools(store, false);
+        Map<?, ?> all = (Map<?, ?>) disabled.memoryGetAll(Map.of("repo", "owner/repo"));
+        assertEquals(true, all.get("disabled"));
+        assertTrue(((List<?>) all.get("rules")).isEmpty());
+
+        Map<?, ?> profile = (Map<?, ?>) disabled.memoryGetDeveloperProfile(Map.of("author", "alice"));
+        assertEquals(true, profile.get("disabled"));
+    }
+
+    @Test
     void fullAgentDryRunWithFakeLlm() throws Exception {
         Settings settings = new Settings(
                 "https://token-plan-cn.xiaomimimo.com/v1",
@@ -621,10 +636,11 @@ class JavaAgentTest {
                 tmp.resolve("fp-report"),
                 30,
                 12000, true, true, 30);
+        settings = settings.withVerifierEnabled(false);
         MemoryTools memory = new MemoryTools(new MemoryStore(settings.memoryDir()));
         memory.memoryGetAll(Map.of());
         memory.memoryAddFalsePositive(Map.of(
-                "pattern", "password problem",
+                "pattern", "fixture-only",
                 "reason", "fixture-like test value",
                 "file_patterns", List.of("src/example.py")
         ));
@@ -634,13 +650,52 @@ class JavaAgentTest {
                         {
                           "summary": "fp",
                           "issues": [
-                            {"severity":"high","category":"security","file":"src/example.py","line":1,"body":"test 文件中的硬编码值 password problem","evidence":"+password = request.args.get('password')","impact":"none","confidence":0.9}
+                            {"severity":"high","category":"security","file":"src/example.py","line":1,"body":"test 文件中的硬编码值 fixture-only","evidence":"+value = 'fixture-only'","impact":"none","confidence":0.9},
+                            {"severity":"high","category":"security","file":"src/example.py","line":1,"body":"unvalidated password is passed into the login flow","evidence":"+password = request.args.get('password')","impact":"request-controlled credentials can bypass validation","suggestion":"validate the credential source before use","confidence":0.9}
                           ],
                           "shouldComment": true
                         }
                         """
         ))))).review("owner/repo", 1);
-        assertTrue(result.issues.isEmpty());
+        assertEquals(1, result.issues.size());
+        assertFalse(result.issues.getFirst().body.contains("fixture-only"));
+    }
+
+    @Test
+    void falsePositiveMemoryDoesNotClearEveryHighSignalFinding() {
+        Settings settings = new Settings(
+                "https://token-plan-cn.xiaomimimo.com/v1",
+                "",
+                "mimo-v2.5-pro",
+                "",
+                true,
+                tmp.resolve("fp-restore-traces"),
+                tmp.resolve("fp-restore-memory"),
+                tmp.resolve("fp-restore-report"),
+                30,
+                12000, true, true, 30);
+        settings = settings.withVerifierEnabled(false);
+        MemoryTools memory = new MemoryTools(new MemoryStore(settings.memoryDir()));
+        memory.memoryGetAll(Map.of());
+        memory.memoryAddFalsePositive(Map.of(
+                "pattern", "fixture-only",
+                "reason", "fixture-like test value",
+                "file_patterns", List.of("src/example.py")
+        ));
+        AgentRunResult result = testAgent(settings, (messages, tools, temperature) -> Map.of("choices", List.of(Map.of("message", Map.of(
+                "role", "assistant",
+                "content", """
+                        {
+                          "summary": "fp",
+                          "issues": [
+                            {"severity":"high","category":"security","file":"src/example.py","line":1,"body":"test 文件中的硬编码值 fixture-only","evidence":"+value = 'fixture-only'","impact":"none","confidence":0.9}
+                          ],
+                          "shouldComment": true
+                        }
+                        """
+        ))))).review("owner/repo", 1);
+        assertEquals(1, result.issues.size());
+        assertEquals("DEMOTE", result.issues.getFirst().validationVerdict);
     }
 
     @Test
@@ -925,12 +980,15 @@ class JavaAgentTest {
     @Test
     void settingsLoadExplicitEnvFile() throws Exception {
         Path env = tmp.resolve(".env");
-        Files.writeString(env, "OPENAI_BASE_URL=https://example.test/v1\nOPENAI_API_KEY=secret\nOPENAI_MODEL=model-x\nCR_AGENT_DRY_RUN=false\nCR_AGENT_REPORT_DIR=custom-report\nCR_AGENT_REPO_AUDIT_RUN_CHECKS=false\nCR_AGENT_LSP_ENABLED=false\nCR_AGENT_LSP_TIMEOUT_SECONDS=7\nCR_AGENT_VERIFIER_ENABLED=false\nCR_AGENT_VERIFIER_MAX_CANDIDATES=3\nCR_AGENT_REVIEW_MAX_COMMENTS=4\nCR_AGENT_REVIEW_PUBLISH_THRESHOLD=0.51\nCR_AGENT_ZERO_ISSUE_RECOVERY=false\nCR_AGENT_LANGUAGE_SKILLS_ENABLED=false\nCR_AGENT_LANGUAGE_SKILL_MAX_SELECTED=2\nCR_AGENT_RECOVERY_MAX_TOOL_ROUNDS=9\nCR_AGENT_VERIFIER_MAX_TOOL_ROUNDS=5\nCR_AGENT_REPO_BATCH_MAX_TOOL_ROUNDS=11\nCR_AGENT_LLM_TRIAGE_ADVICE=false\nCR_AGENT_LLM_CONTEXT_SCOUT=false\nCR_AGENT_LLM_RISK_REFINEMENT=false\nCR_AGENT_LLM_TEST_REASONING=false\nCR_AGENT_LLM_ACT_PLANNING=true\nCR_AGENT_CONTEXT_RRF_K=77\nCR_AGENT_CONTEXT_MAX_ITEMS=12\n", StandardCharsets.UTF_8);
+        Files.writeString(env, "OPENAI_BASE_URL=https://example.test/v1\nOPENAI_API_KEY=secret\nOPENAI_MODEL=model-x\nCR_AGENT_LLM_THINKING_MODE=disabled\nCR_AGENT_LLM_TIMEOUT_SECONDS=123\nCR_AGENT_DRY_RUN=false\nCR_AGENT_REPORT_DIR=custom-report\nCR_AGENT_MEMORY_READ_ENABLED=false\nCR_AGENT_REPO_AUDIT_RUN_CHECKS=false\nCR_AGENT_LSP_ENABLED=false\nCR_AGENT_LSP_TIMEOUT_SECONDS=7\nCR_AGENT_VERIFIER_ENABLED=false\nCR_AGENT_VERIFIER_MAX_CANDIDATES=3\nCR_AGENT_REVIEW_MAX_COMMENTS=4\nCR_AGENT_REVIEW_PUBLISH_THRESHOLD=0.51\nCR_AGENT_ZERO_ISSUE_RECOVERY=false\nCR_AGENT_LANGUAGE_SKILLS_ENABLED=false\nCR_AGENT_LANGUAGE_SKILL_MAX_SELECTED=2\nCR_AGENT_RECOVERY_MAX_TOOL_ROUNDS=9\nCR_AGENT_VERIFIER_MAX_TOOL_ROUNDS=5\nCR_AGENT_REPO_BATCH_MAX_TOOL_ROUNDS=11\nCR_AGENT_LLM_TRIAGE_ADVICE=false\nCR_AGENT_LLM_CONTEXT_SCOUT=false\nCR_AGENT_LLM_RISK_REFINEMENT=false\nCR_AGENT_LLM_TEST_REASONING=false\nCR_AGENT_LLM_ACT_PLANNING=true\nCR_AGENT_CONTEXT_RRF_K=77\nCR_AGENT_CONTEXT_MAX_ITEMS=12\n", StandardCharsets.UTF_8);
         Settings settings = Settings.load(env);
         assertEquals("https://example.test/v1", settings.openaiBaseUrl());
         assertEquals("secret", settings.openaiApiKey());
         assertEquals("model-x", settings.openaiModel());
+        assertEquals("disabled", settings.llmThinkingMode());
+        assertEquals(123, settings.llmTimeoutSeconds());
         assertTrue(settings.reportDir().endsWith("custom-report"));
+        assertFalse(settings.memoryReadEnabled());
         assertFalse(settings.repoAuditRunChecks());
         assertFalse(settings.lspEnabled());
         assertEquals(7, settings.lspTimeoutSeconds());

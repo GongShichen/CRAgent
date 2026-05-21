@@ -2,6 +2,7 @@ package com.cragent.agent;
 
 import com.cragent.config.Settings;
 import com.cragent.llm.LlmClient;
+import com.cragent.llm.LlmTelemetry;
 import com.cragent.llm.OpenAiCompatibleClient;
 import com.cragent.model.ChatMessage;
 import com.cragent.skills.SkillDescriptor;
@@ -94,18 +95,18 @@ public class LanguageSkillRouter {
             return List.of();
         }
         Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("instruction", """
+                Select only the language-specific code review skills needed for this target.
+                Return exactly one JSON object: {"selected_skills":[{"name":"code-review-lang-...","reason":"short reason","matched_languages":["..."],"matched_files":["..."]}]}.
+                Use only provided descriptors. Do not select unrelated languages.
+                """);
+        payload.put("skill_descriptors", catalog.stream().map(SkillDescriptor::toMap).toList());
         payload.put("mode", mode);
         payload.put("files", files);
         payload.put("risk_model", context.getOrDefault("risk_model", Map.of()));
         payload.put("risk_probes", context.getOrDefault("risk_probes", List.of()));
         payload.put("lsp_context", compact(context.get("lsp_context")));
         payload.put("static_checks", compact(context.get("static_checks")));
-        payload.put("skill_descriptors", catalog.stream().map(SkillDescriptor::toMap).toList());
-        payload.put("instruction", """
-                Select only the language-specific code review skills needed for this target.
-                Return exactly one JSON object: {"selected_skills":[{"name":"code-review-lang-...","reason":"short reason","matched_languages":["..."],"matched_files":["..."]}]}.
-                Use only provided descriptors. Do not select unrelated languages.
-                """);
         List<ChatMessage> messages = List.of(
                 new ChatMessage("system", "You are a language skill router. You expose only skill names selected from the catalog."),
                 new ChatMessage("user", Jsons.stringify(payload))
@@ -119,7 +120,7 @@ public class LanguageSkillRouter {
         ));
         try {
             Map<String, Object> response = llm.chatJson(messages, List.of(), 0.0);
-            trace.record("llm_response", Map.of("phase", "LANGUAGE_SKILL_ROUTER", "mode", mode, "response", response));
+            LlmTelemetry.recordResponse(trace, "LANGUAGE_SKILL_ROUTER", 1, response, Map.of("mode", mode));
             Map<String, Object> parsed = Jsons.parseMap(OpenAiCompatibleClient.assistantMessage(response).content);
             return normalizeSelected(parsed.get("selected_skills"), catalog, files);
         } catch (Exception e) {
