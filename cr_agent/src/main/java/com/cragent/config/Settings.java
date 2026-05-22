@@ -14,6 +14,9 @@ public record Settings(
         String openaiModel,
         String llmThinkingMode,
         int llmTimeoutSeconds,
+        int llmRetryMaxAttempts,
+        int llmRetryInitialBackoffMillis,
+        int llmRetryMaxBackoffMillis,
         String githubToken,
         boolean dryRun,
         Path traceDir,
@@ -46,7 +49,7 @@ public record Settings(
     public Settings(String openaiBaseUrl, String openaiApiKey, String openaiModel, String githubToken,
                     boolean dryRun, Path traceDir, Path memoryDir, Path reportDir, int maxIterations,
                     int maxToolResultChars, boolean repoAuditRunChecks, boolean lspEnabled, int lspTimeoutSeconds) {
-        this(openaiBaseUrl, openaiApiKey, openaiModel, "", 300, githubToken, dryRun, traceDir, memoryDir, true, reportDir,
+        this(openaiBaseUrl, openaiApiKey, openaiModel, "", 300, 5, 1000, 30000, githubToken, dryRun, traceDir, memoryDir, true, reportDir,
                 maxIterations, maxToolResultChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds,
                 true, 8, 12, 0.25, true, true, 6, 6, 4, 6,
                 true, true, true, true, false, 60, 40);
@@ -60,6 +63,9 @@ public record Settings(
             env.putAll(readDotEnv(cwd.getParent().resolve(".env")));
         }
         env.putAll(readDotEnv(Path.of(".env")));
+        if (Boolean.parseBoolean(System.getenv().getOrDefault("CR_AGENT_EVAL_MODE", "false"))) {
+            overlayEvalConfig(env, System.getenv());
+        }
         return from(env);
     }
 
@@ -71,7 +77,8 @@ public record Settings(
     }
 
     public Settings withDryRun(boolean value) {
-        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, llmThinkingMode, llmTimeoutSeconds, githubToken, value, traceDir, memoryDir, memoryReadEnabled, reportDir,
+        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, llmThinkingMode, llmTimeoutSeconds, llmRetryMaxAttempts, llmRetryInitialBackoffMillis,
+                llmRetryMaxBackoffMillis, githubToken, value, traceDir, memoryDir, memoryReadEnabled, reportDir,
                 maxIterations, maxToolResultChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds,
                 verifierEnabled, verifierMaxCandidates, reviewMaxComments, reviewPublishThreshold, zeroIssueRecovery,
                 languageSkillsEnabled, languageSkillMaxSelected, recoveryMaxToolRounds, verifierMaxToolRounds, repoBatchMaxToolRounds,
@@ -79,7 +86,8 @@ public record Settings(
     }
 
     public Settings withTraceDir(Path value) {
-        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, llmThinkingMode, llmTimeoutSeconds, githubToken, dryRun, value, memoryDir, memoryReadEnabled, reportDir,
+        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, llmThinkingMode, llmTimeoutSeconds, llmRetryMaxAttempts, llmRetryInitialBackoffMillis,
+                llmRetryMaxBackoffMillis, githubToken, dryRun, value, memoryDir, memoryReadEnabled, reportDir,
                 maxIterations, maxToolResultChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds,
                 verifierEnabled, verifierMaxCandidates, reviewMaxComments, reviewPublishThreshold, zeroIssueRecovery,
                 languageSkillsEnabled, languageSkillMaxSelected, recoveryMaxToolRounds, verifierMaxToolRounds, repoBatchMaxToolRounds,
@@ -87,7 +95,8 @@ public record Settings(
     }
 
     public Settings withVerifierEnabled(boolean value) {
-        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, llmThinkingMode, llmTimeoutSeconds, githubToken, dryRun, traceDir, memoryDir, memoryReadEnabled, reportDir,
+        return new Settings(openaiBaseUrl, openaiApiKey, openaiModel, llmThinkingMode, llmTimeoutSeconds, llmRetryMaxAttempts, llmRetryInitialBackoffMillis,
+                llmRetryMaxBackoffMillis, githubToken, dryRun, traceDir, memoryDir, memoryReadEnabled, reportDir,
                 maxIterations, maxToolResultChars, repoAuditRunChecks, lspEnabled, lspTimeoutSeconds,
                 value, verifierMaxCandidates, reviewMaxComments, reviewPublishThreshold, zeroIssueRecovery,
                 languageSkillsEnabled, languageSkillMaxSelected, recoveryMaxToolRounds, verifierMaxToolRounds, repoBatchMaxToolRounds,
@@ -101,6 +110,9 @@ public record Settings(
                 env.getOrDefault("OPENAI_MODEL", "mimo-v2.5-pro"),
                 env.getOrDefault("CR_AGENT_LLM_THINKING_MODE", ""),
                 Integer.parseInt(env.getOrDefault("CR_AGENT_LLM_TIMEOUT_SECONDS", "300")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_LLM_RETRY_MAX_ATTEMPTS", "5")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_LLM_RETRY_INITIAL_BACKOFF_MILLIS", "1000")),
+                Integer.parseInt(env.getOrDefault("CR_AGENT_LLM_RETRY_MAX_BACKOFF_MILLIS", "30000")),
                 env.getOrDefault("GITHUB_TOKEN", ""),
                 Boolean.parseBoolean(env.getOrDefault("CR_AGENT_DRY_RUN", "true")),
                 Path.of(env.getOrDefault("CR_AGENT_TRACE_DIR", "data/traces")),
@@ -170,5 +182,13 @@ public record Settings(
             throw new IllegalStateException("Unable to read .env file: " + path, e);
         }
         return values;
+    }
+
+    private static void overlayEvalConfig(Map<String, String> env, Map<String, String> processEnv) {
+        processEnv.forEach((key, value) -> {
+            if (key.startsWith("CR_AGENT_")) {
+                env.put(key, value);
+            }
+        });
     }
 }

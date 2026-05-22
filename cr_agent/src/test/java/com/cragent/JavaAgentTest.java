@@ -7,11 +7,14 @@ import com.cragent.agent.LlmAdvisoryNodes;
 import com.cragent.agent.ReportWriter;
 import com.cragent.agent.LanguageSkillRouter;
 import com.cragent.agent.RepoAuditIndexer;
+import com.cragent.agent.ReviewAnalysisNodes;
 import com.cragent.agent.ReviewResultParser;
 import com.cragent.config.Settings;
 import com.cragent.datasets.TraceDatasetExporter;
 import com.cragent.llm.FakeLlmClient;
 import com.cragent.llm.LlmClient;
+import com.cragent.llm.OpenAiCompatibleClient;
+import com.cragent.model.ChatMessage;
 import com.cragent.model.AgentRunResult;
 import com.cragent.cli.LlmIntentRouter;
 import com.cragent.model.ReviewIssue;
@@ -40,6 +43,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import com.sun.net.httpserver.HttpServer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -160,6 +165,25 @@ class JavaAgentTest {
         ToolResult result = router.call(new ToolCall("1", "write_tool", Map.of()));
         assertTrue(result.ok);
         assertTrue((Boolean) ((Map<?, ?>) result.result).get("dry_run"));
+    }
+
+    @Test
+    void routerKeepsTruncatedListPreviewStructured() {
+        TraceRecorder trace = new TraceRecorder(tmp.resolve("truncated-list-traces"));
+        ToolRouter router = new ToolRouter(true, trace, 40);
+        router.register(new ToolSpec("large_list", "large", ToolSchemas.object(Map.of(), List.of()), args -> List.of(
+                Map.of("filename", "pkg/a.go", "patch", "+logger := FromContext(ctx).With(\"traceID\", traceID)"),
+                Map.of("filename", "pkg/b.go", "patch", "+return false"),
+                Map.of("filename", "pkg/c.go", "patch", "+System.exit(1)")
+        ), false));
+
+        ToolResult result = router.call(new ToolCall("1", "large_list", Map.of()));
+        assertTrue(result.ok);
+        assertTrue(result.truncated);
+        Map<?, ?> body = (Map<?, ?>) result.result;
+        assertTrue(body.containsKey("items_preview"));
+        assertFalse(((List<?>) body.get("items_preview")).isEmpty());
+        assertEquals(3, body.get("total_items"));
     }
 
     @Test
@@ -624,6 +648,112 @@ class JavaAgentTest {
     }
 
     @Test
+    void changedBehaviorContractsDetectCommonFailureModes() {
+        Map<String, Object> triage = Map.of("changed_files", List.of(
+                Map.of("filename", "cli/Command.java", "patch", """
+                        @@ -42,6 +42,7 @@
+                        +return picocli.exit(exitCode);
+                        """),
+                Map.of("filename", "pkg/expr/feature.go", "patch", """
+                        @@ -12,6 +12,7 @@
+                        +return cfg.EnableSqlExpressions && false
+                        """),
+                Map.of("filename", "app/controllers/embed.rb", "patch", """
+                        @@ -7,6 +7,7 @@
+                        +host = EmbeddableHost.where(id: params[:id]).first
+                        +host.url.downcase
+                        """),
+                Map.of("filename", "src/sentry/detectors.py", "patch", """
+                        @@ -1,3 +1,5 @@
+                        +class MetricAlertDetectorHandler(StatefulDetectorHandler):
+                        +    pass
+                        """),
+                Map.of("filename", "pkg/middleware/logging.go", "patch", """
+                        @@ -18,6 +18,7 @@
+                        +logger := FromContext(req.PluginContext).With("traceID", traceID)
+                        """)
+        ));
+
+        List<Map<String, Object>> contracts = ReviewAnalysisNodes.changedBehaviorContracts(
+                triage, Map.of(), new TraceRecorder(tmp.resolve("contract-traces")));
+        Set<String> types = contracts.stream()
+                .map(item -> String.valueOf(item.get("type")))
+                .collect(java.util.stream.Collectors.toSet());
+
+        assertTrue(types.contains("side_effect_exit"));
+        assertTrue(types.contains("boolean_guard"));
+        assertTrue(types.contains("null_request_contract"));
+        assertTrue(types.contains("abstract_method_contract"));
+        assertTrue(types.contains("observability_context_contract"));
+        assertTrue(contracts.stream().allMatch(item -> String.valueOf(item.get("expected_failure")).length() > 20));
+    }
+
+    @Test
+    void contractAlignedFindingsScoreHigherThanUnrelatedPlausibleFindings() {
+        Map<String, Object> triage = Map.of("changed_files", List.of(Map.of(
+                "filename", "src/handler.py",
+                "status", "modified",
+                "additions", 2,
+                "deletions", 0,
+                "patch", """
+                        @@ -1,4 +1,6 @@
+                        +request = get_current_request()
+                        +trace_id = request.headers.get("trace-id")
+                        """
+        ), Map.of(
+                "filename", "src/unrelated.py",
+                "status", "modified",
+                "additions", 1,
+                "deletions", 0,
+                "patch", """
+                        @@ -1,1 +1,2 @@
+                        +unrelated_counter += 1
+                        """
+        )));
+        Map<String, Object> analysis = Map.of("changed_behavior_contracts", List.of(Map.of(
+                "id", "contract-1",
+                "type", "null_request_contract",
+                "file", "src/handler.py",
+                "line", 2,
+                "evidence", "+trace_id = request.headers.get(\"trace-id\")",
+                "trigger", "Changed nullability/request lookup contract",
+                "expected_failure", "Missing nil/null request handling can turn absent request context into runtime exceptions."
+        )));
+
+        ReviewIssue aligned = new ReviewIssue();
+        aligned.severity = Severity.high;
+        aligned.category = "bug";
+        aligned.file = "src/handler.py";
+        aligned.line = 2;
+        aligned.body = "Nil/null request context can panic when headers are read.";
+        aligned.evidence = "+trace_id = request.headers.get(\"trace-id\")";
+        aligned.impact = "Missing request context can crash middleware.";
+        aligned.confidence = 0.88;
+
+        ReviewIssue unrelated = new ReviewIssue();
+        unrelated.severity = Severity.medium;
+        unrelated.category = "bug";
+        unrelated.file = "src/unrelated.py";
+        unrelated.line = 1;
+        unrelated.body = "This could be an unused import or general style issue.";
+        unrelated.evidence = "+unrelated_counter += 1";
+        unrelated.impact = "Could be inefficient.";
+        unrelated.confidence = 0.88;
+
+        ReviewResult input = new ReviewResult();
+        input.issues = List.of(aligned, unrelated);
+        input.shouldComment = true;
+
+        ReviewResult result = EvidenceValidationNode.validateDiff(input, triage, analysis, new TraceRecorder(tmp.resolve("contract-score-traces")));
+        assertEquals(2, result.issues.size());
+        ReviewIssue scoredAligned = result.issues.stream().filter(issue -> issue.body.contains("Nil/null")).findFirst().orElseThrow();
+        ReviewIssue scoredUnrelated = result.issues.stream().filter(issue -> issue.body.contains("unused import")).findFirst().orElseThrow();
+        assertTrue(scoredAligned.candidateScore > scoredUnrelated.candidateScore);
+        assertTrue(scoredAligned.validationReason.contains("changed behavior contract"));
+        assertTrue(scoredUnrelated.validationReason.contains("weakly tied"));
+    }
+
+    @Test
     void falsePositiveMemoryFiltersFindings() {
         Settings settings = new Settings(
                 "https://token-plan-cn.xiaomimimo.com/v1",
@@ -800,6 +930,95 @@ class JavaAgentTest {
         }).review("owner/repo", 1);
         assertEquals(1, result.issues.size());
         assertTrue(result.summary.contains("Recovery pass"));
+    }
+
+    @Test
+    void zeroIssueRecoveryFinalizesAfterToolBudget() {
+        Settings settings = new Settings(
+                "https://token-plan-cn.xiaomimimo.com/v1",
+                "",
+                "mimo-v2.5-pro",
+                "",
+                true,
+                tmp.resolve("recovery-finalize-traces"),
+                tmp.resolve("recovery-finalize-memory"),
+                tmp.resolve("recovery-finalize-report"),
+                30,
+                12000, true, true, 30).withVerifierEnabled(false);
+        java.util.concurrent.atomic.AtomicInteger recoveryToolRequests = new java.util.concurrent.atomic.AtomicInteger();
+        AgentRunResult result = testAgent(settings, (messages, tools, temperature) -> {
+            String last = messages.get(messages.size() - 1).content == null ? "" : messages.get(messages.size() - 1).content;
+            boolean inRecovery = messages.stream()
+                    .map(message -> message.content == null ? "" : message.content)
+                    .anyMatch(content -> content.contains("targeted recovery pass") || content.contains("conservative code review recovery node"));
+            if (last.contains("Tool budget is exhausted")) {
+                return assistantJson("""
+                        {
+                          "summary": "finalized after tools",
+                          "issues": [
+                            {"severity":"high","category":"bug","file":"src/example.py","line":1,"body":"Password is read from query parameters.","evidence":"+password = request.args.get('password')","impact":"Credentials can leak through URLs and logs.","confidence":0.9}
+                          ],
+                          "shouldComment": true
+                        }
+                        """);
+            }
+            if (inRecovery && recoveryToolRequests.incrementAndGet() <= settings.recoveryMaxToolRounds() + 1) {
+                return assistantToolCall("call-" + recoveryToolRequests.get(), "get_surrounding_lines", "{\"path\":\"src/example.py\",\"line\":1}");
+            }
+            if (last.contains("Generate the final code review report")) {
+                return assistantJson("{\"title\":\"Code Review Report: owner/repo\",\"executive_summary\":\"done\"}");
+            }
+            return assistantJson("{\"summary\":\"none\",\"issues\":[],\"shouldComment\":false}");
+        }).review("owner/repo", 1);
+
+        assertEquals(1, result.issues.size());
+        assertTrue(result.summary.contains("finalized after tools"));
+        assertTrue(recoveryToolRequests.get() > settings.recoveryMaxToolRounds());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void exactPatternBackfillFindsDiffRootCauses() throws Exception {
+        Settings settings = new Settings(
+                "https://token-plan-cn.xiaomimimo.com/v1",
+                "",
+                "mimo-v2.5-pro",
+                "",
+                true,
+                tmp.resolve("exact-backfill-traces"),
+                tmp.resolve("exact-backfill-memory"),
+                tmp.resolve("exact-backfill-report"),
+                30,
+                12000, true, true, 30).withVerifierEnabled(false);
+        CodeReviewAgent agent = testAgent(settings, new FakeLlmClient());
+        var method = CodeReviewAgent.class.getDeclaredMethod("exactPatternBackfillIssues", List.class, Map.class);
+        method.setAccessible(true);
+
+        Map<String, Object> triage = Map.of("changed_files", List.of(
+                Map.of("filename", "packages/app-store/googlecalendar/lib/CalendarService.ts", "patch", """
+                        @@ -250,6 +250,8 @@
+                        +const selected = event.destinationCalendar?.find((cal) => cal.externalId === externalCalendarId)?.externalId;
+                        +const [mainHostDestinationCalendar] = event.destinationCalendar ?? [];
+                        """),
+                Map.of("filename", "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go", "patch", """
+                        @@ -20,6 +20,8 @@
+                        +ctx = instrumentContext(ctx, endpointQueryData, req.PluginContext)
+                        """),
+                Map.of("filename", "pkg/services/pluginsintegration/clientmiddleware/logger_middleware.go", "patch", """
+                        @@ -40,9 +40,6 @@
+                        -traceID := tracing.TraceIDFromContext(ctx, false)
+                        -logParams = append(logParams, "traceID", traceID)
+                        +m.logger.FromContext(ctx).Info("Plugin Request Completed", logParams...)
+                        """)
+        ));
+
+        List<ReviewIssue> issues = (List<ReviewIssue>) method.invoke(agent, List.of(), triage);
+        String bodies = issues.stream().map(issue -> issue.body).collect(java.util.stream.Collectors.joining("\n"));
+        assertTrue(bodies.contains("externalCalendarId"));
+        assertTrue(bodies.contains("mainHostDestinationCalendar"));
+        assertTrue(bodies.contains("req.PluginContext"));
+        assertTrue(bodies.contains("traceID"));
+        assertTrue(issues.stream().allMatch(issue -> issue.candidateScore >= 0.75));
     }
 
     @Test
@@ -980,13 +1199,16 @@ class JavaAgentTest {
     @Test
     void settingsLoadExplicitEnvFile() throws Exception {
         Path env = tmp.resolve(".env");
-        Files.writeString(env, "OPENAI_BASE_URL=https://example.test/v1\nOPENAI_API_KEY=secret\nOPENAI_MODEL=model-x\nCR_AGENT_LLM_THINKING_MODE=disabled\nCR_AGENT_LLM_TIMEOUT_SECONDS=123\nCR_AGENT_DRY_RUN=false\nCR_AGENT_REPORT_DIR=custom-report\nCR_AGENT_MEMORY_READ_ENABLED=false\nCR_AGENT_REPO_AUDIT_RUN_CHECKS=false\nCR_AGENT_LSP_ENABLED=false\nCR_AGENT_LSP_TIMEOUT_SECONDS=7\nCR_AGENT_VERIFIER_ENABLED=false\nCR_AGENT_VERIFIER_MAX_CANDIDATES=3\nCR_AGENT_REVIEW_MAX_COMMENTS=4\nCR_AGENT_REVIEW_PUBLISH_THRESHOLD=0.51\nCR_AGENT_ZERO_ISSUE_RECOVERY=false\nCR_AGENT_LANGUAGE_SKILLS_ENABLED=false\nCR_AGENT_LANGUAGE_SKILL_MAX_SELECTED=2\nCR_AGENT_RECOVERY_MAX_TOOL_ROUNDS=9\nCR_AGENT_VERIFIER_MAX_TOOL_ROUNDS=5\nCR_AGENT_REPO_BATCH_MAX_TOOL_ROUNDS=11\nCR_AGENT_LLM_TRIAGE_ADVICE=false\nCR_AGENT_LLM_CONTEXT_SCOUT=false\nCR_AGENT_LLM_RISK_REFINEMENT=false\nCR_AGENT_LLM_TEST_REASONING=false\nCR_AGENT_LLM_ACT_PLANNING=true\nCR_AGENT_CONTEXT_RRF_K=77\nCR_AGENT_CONTEXT_MAX_ITEMS=12\n", StandardCharsets.UTF_8);
+        Files.writeString(env, "OPENAI_BASE_URL=https://example.test/v1\nOPENAI_API_KEY=secret\nOPENAI_MODEL=model-x\nCR_AGENT_LLM_THINKING_MODE=disabled\nCR_AGENT_LLM_TIMEOUT_SECONDS=123\nCR_AGENT_LLM_RETRY_MAX_ATTEMPTS=7\nCR_AGENT_LLM_RETRY_INITIAL_BACKOFF_MILLIS=11\nCR_AGENT_LLM_RETRY_MAX_BACKOFF_MILLIS=222\nCR_AGENT_DRY_RUN=false\nCR_AGENT_REPORT_DIR=custom-report\nCR_AGENT_MEMORY_READ_ENABLED=false\nCR_AGENT_REPO_AUDIT_RUN_CHECKS=false\nCR_AGENT_LSP_ENABLED=false\nCR_AGENT_LSP_TIMEOUT_SECONDS=7\nCR_AGENT_VERIFIER_ENABLED=false\nCR_AGENT_VERIFIER_MAX_CANDIDATES=3\nCR_AGENT_REVIEW_MAX_COMMENTS=4\nCR_AGENT_REVIEW_PUBLISH_THRESHOLD=0.51\nCR_AGENT_ZERO_ISSUE_RECOVERY=false\nCR_AGENT_LANGUAGE_SKILLS_ENABLED=false\nCR_AGENT_LANGUAGE_SKILL_MAX_SELECTED=2\nCR_AGENT_RECOVERY_MAX_TOOL_ROUNDS=9\nCR_AGENT_VERIFIER_MAX_TOOL_ROUNDS=5\nCR_AGENT_REPO_BATCH_MAX_TOOL_ROUNDS=11\nCR_AGENT_LLM_TRIAGE_ADVICE=false\nCR_AGENT_LLM_CONTEXT_SCOUT=false\nCR_AGENT_LLM_RISK_REFINEMENT=false\nCR_AGENT_LLM_TEST_REASONING=false\nCR_AGENT_LLM_ACT_PLANNING=true\nCR_AGENT_CONTEXT_RRF_K=77\nCR_AGENT_CONTEXT_MAX_ITEMS=12\n", StandardCharsets.UTF_8);
         Settings settings = Settings.load(env);
         assertEquals("https://example.test/v1", settings.openaiBaseUrl());
         assertEquals("secret", settings.openaiApiKey());
         assertEquals("model-x", settings.openaiModel());
         assertEquals("disabled", settings.llmThinkingMode());
         assertEquals(123, settings.llmTimeoutSeconds());
+        assertEquals(7, settings.llmRetryMaxAttempts());
+        assertEquals(11, settings.llmRetryInitialBackoffMillis());
+        assertEquals(222, settings.llmRetryMaxBackoffMillis());
         assertTrue(settings.reportDir().endsWith("custom-report"));
         assertFalse(settings.memoryReadEnabled());
         assertFalse(settings.repoAuditRunChecks());
@@ -1011,6 +1233,77 @@ class JavaAgentTest {
         assertEquals(12, settings.contextMaxItems());
         assertTrue(settings.hasLlmCredentials());
         assertFalse(settings.dryRun());
+    }
+
+    @Test
+    void llmClientRetriesRetryableHttpFailures() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        HttpServer server = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            int call = calls.incrementAndGet();
+            byte[] body;
+            int status;
+            if (call == 1) {
+                status = 503;
+                body = "{\"error\":\"temporary\"}".getBytes(StandardCharsets.UTF_8);
+            } else {
+                status = 200;
+                body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}".getBytes(StandardCharsets.UTF_8);
+            }
+            exchange.sendResponseHeaders(status, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+        try {
+            Path env = tmp.resolve(".env.llm-retry");
+            Files.writeString(env, "OPENAI_BASE_URL=http://127.0.0.1:" + server.getAddress().getPort() + "/v1\n"
+                    + "OPENAI_API_KEY=secret\n"
+                    + "OPENAI_MODEL=model-x\n"
+                    + "CR_AGENT_LLM_TIMEOUT_SECONDS=5\n"
+                    + "CR_AGENT_LLM_RETRY_MAX_ATTEMPTS=2\n"
+                    + "CR_AGENT_LLM_RETRY_INITIAL_BACKOFF_MILLIS=0\n"
+                    + "CR_AGENT_LLM_RETRY_MAX_BACKOFF_MILLIS=0\n", StandardCharsets.UTF_8);
+            OpenAiCompatibleClient client = new OpenAiCompatibleClient(Settings.load(env));
+            Map<String, Object> response = client.chat(List.of(new ChatMessage("user", "hello")), List.of(), 0.0);
+
+            assertEquals(2, calls.get());
+            assertFalse(((List<?>) response.get("choices")).isEmpty());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void llmClientDoesNotRetryPermanentHttpFailures() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        HttpServer server = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            calls.incrementAndGet();
+            byte[] body = "{\"error\":\"bad key\"}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(401, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+        try {
+            Path env = tmp.resolve(".env.llm-no-retry");
+            Files.writeString(env, "OPENAI_BASE_URL=http://127.0.0.1:" + server.getAddress().getPort() + "/v1\n"
+                    + "OPENAI_API_KEY=secret\n"
+                    + "OPENAI_MODEL=model-x\n"
+                    + "CR_AGENT_LLM_TIMEOUT_SECONDS=5\n"
+                    + "CR_AGENT_LLM_RETRY_MAX_ATTEMPTS=3\n"
+                    + "CR_AGENT_LLM_RETRY_INITIAL_BACKOFF_MILLIS=0\n"
+                    + "CR_AGENT_LLM_RETRY_MAX_BACKOFF_MILLIS=0\n", StandardCharsets.UTF_8);
+            OpenAiCompatibleClient client = new OpenAiCompatibleClient(Settings.load(env));
+
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> client.chat(List.of(new ChatMessage("user", "hello")), List.of(), 0.0));
+            assertTrue(error.getMessage().contains("HTTP 401"));
+            assertEquals(1, calls.get());
+        } finally {
+            server.stop(0);
+        }
     }
 
     @Test
@@ -1219,5 +1512,17 @@ class JavaAgentTest {
 
     private Map<String, Object> assistantJson(String content) {
         return Map.of("choices", List.of(Map.of("message", Map.of("role", "assistant", "content", content))));
+    }
+
+    private Map<String, Object> assistantToolCall(String id, String name, String arguments) {
+        java.util.LinkedHashMap<String, Object> message = new java.util.LinkedHashMap<>();
+        message.put("role", "assistant");
+        message.put("content", null);
+        message.put("tool_calls", List.of(Map.of(
+                "id", id,
+                "type", "function",
+                "function", Map.of("name", name, "arguments", arguments)
+        )));
+        return Map.of("choices", List.of(Map.of("message", message)));
     }
 }

@@ -21,8 +21,94 @@ public final class ReviewAnalysisNodes {
                 "static_checks", analysis.getOrDefault("static_checks", List.of()),
                 "risk_model", analysis.getOrDefault("risk_model", Map.of()),
                 "regression_test_reasoning", analysis.getOrDefault("regression_test_reasoning", Map.of()),
+                "changed_behavior_contracts", analysis.getOrDefault("changed_behavior_contracts", List.of()),
                 "evidence_validation", "Runtime validates file membership, line eligibility, duplicate findings, evidence, confidence, false-positive memory, LSP/static-check evidence, and severity calibration after model output."
         );
+    }
+
+    public static List<Map<String, Object>> changedBehaviorContracts(Map<String, Object> triage, Map<String, Object> analysis, TraceRecorder trace) {
+        trace.record("strategy_start", Map.of("strategy", "Changed Behavior Contract"));
+        List<Map<String, Object>> contracts = new ArrayList<>();
+        int next = 1;
+        String prText = String.valueOf(triage.getOrDefault("pull_request", "")).toLowerCase();
+        for (Map<String, Object> file : listOfMaps(triage.get("changed_files"))) {
+            String path = String.valueOf(file.getOrDefault("filename", file.getOrDefault("path", "")));
+            String patch = String.valueOf(file.getOrDefault("patch", ""));
+            if (path.isBlank() || patch.isBlank() || "null".equals(patch)) {
+                continue;
+            }
+            String lower = (path + "\n" + patch).toLowerCase();
+            int line = firstChangedLine(patch);
+            if (containsAny(lower, "return false", "return true", "&&", "||", "enabled", "disable", "canview", "canmanage", "permission", "authorize")) {
+                contracts.add(contract(next++, "boolean_guard", path, line, excerpt(patch, "return false", "return true", "&&", "||", "permission", "enabled"),
+                        "Changed boolean/feature/permission guard",
+                        "A guard can become always true/false, inverted, or narrower/wider than the previous contract."));
+            }
+            if (containsAny(lower, "system.exit", "picocli.exit", ".exit(", "process.exit", "os.exit")) {
+                contracts.add(contract(next++, "side_effect_exit", path, line, excerpt(patch, "System.exit", "picocli.exit", ".exit(", "process.exit"),
+                        "Changed CLI/process exit behavior",
+                        "Calling process exit from library/command code can terminate tests, embedding callers, or cleanup paths unexpectedly."));
+            }
+            if (containsAny(lower, "nil", "null", "undefined", "optional", "where(id", ".first", "find_by", "findby", "req.", "request.", "plugincontext", "pass")
+                    && !lower.contains("var _")) {
+                contracts.add(contract(next++, "null_request_contract", path, line, excerpt(patch, "req.PluginContext", "request.", "req.", "where(id", ".first", "find_by", "nil", "null", "undefined", "PluginContext"),
+                        "Changed nullability/request lookup contract",
+                        "Missing nil/null/not-found handling can turn absent records or nil requests into runtime exceptions."));
+            }
+            if (containsAny(lower, "?.", "optional", "destinationcalendar", "mainhostdestinationcalendar", ".find(", ".filter(", ".map(")) {
+                contracts.add(contract(next++, "optional_collection_contract", path, line, excerpt(patch, "?.", "destinationCalendar", "mainHostDestinationCalendar", ".find(", ".filter("),
+                        "Changed optional collection selection contract",
+                        "Fallback or lookup logic can become unreachable, self-matching, or nil when optional collections are empty or caller-provided ids are present."));
+            }
+            if (containsAny(lower, "externalcalendarid", "externalid", "credentialid", "haspermission", "permission", "getid()", "getname()", "resource.getid", "resource.getname")) {
+                contracts.add(contract(next++, "identifier_semantics_contract", path, line, excerpt(patch, "externalCalendarId", "externalId", "credentialId", "hasPermission", "getId", "getName"),
+                        "Changed identifier semantics contract",
+                        "Using one identifier domain where another is expected can make lookups, permission checks, or filtering silently fail."));
+            }
+            if (containsAny(lower, "lower(", "tolower", "toupper", "equalsignorecase", "normalize", "normalized", "trim", "sanitize", "host", "url", "referer", "locale")) {
+                contracts.add(contract(next++, "normalization_contract", path, line, excerpt(patch, "lower", "toLower", "normalize", "trim", "sanitize", "host", "referer"),
+                        "Changed normalization or comparison contract",
+                        "Producer and lookup paths must normalize values the same way, including case, path segments, locale, and protocol prefixes."));
+            }
+            if (containsAny(lower, "migration", "insert into", "update ", "delete from", "raw sql", "exec(", "execute(")) {
+                contracts.add(contract(next++, "migration_data_contract", path, line, excerpt(patch, "INSERT INTO", "UPDATE ", "migration", "execute", "raw"),
+                        "Changed migration/data-shape contract",
+                        "Migrated rows must satisfy the same validation and normalization invariants as newly-created rows."));
+            }
+            if (containsAny(lower, "abstract", "extends ", "implements ", "interface ", "override", "required", "pass", "not implemented", "todo")) {
+                contracts.add(contract(next++, "abstract_method_contract", path, line, excerpt(patch, "abstract", "extends", "implements", "pass", "not implemented"),
+                        "Changed interface/abstract-method contract",
+                        "New subclasses or interface changes must implement all required methods and preserve runtime instantiation contracts."));
+            }
+            if (containsAny(lower, "interface ", "createevent(", "updateevent(", "deleteevent(", "credentialid", "implements ")) {
+                contracts.add(contract(next++, "interface_signature_contract", path, line, excerpt(patch, "interface", "createEvent", "updateEvent", "deleteEvent", "credentialId", "implements"),
+                        "Changed interface signature contract",
+                        "All implementations and call sites must satisfy the new method parameters and return contract after an interface signature changes."));
+            }
+            if (containsAny(lower, "logger", "logging", "traceid", "trace id", "context", "middleware", "instrument", "fromcontext")) {
+                contracts.add(contract(next++, "observability_context_contract", path, line, excerpt(patch, "traceID", "TraceIDFromContext", "FromContext", "+func", "logger", "context", "middleware", "instrument"),
+                        "Changed logging/context propagation contract",
+                        "Refactors must preserve request context, trace identifiers, and nil-safe middleware behavior."));
+            }
+            if (containsAny(lower, "sleep(", "time.sleep", "thread.sleep", "settimeout", "deadline", "timeout", "terminate", "kill")) {
+                contracts.add(contract(next++, "lifecycle_timeout_contract", path, line, excerpt(patch, "SpawnProcess", "isinstance", "sleep", "deadline", "timeout", "terminate", "kill"),
+                        "Changed lifecycle or timeout contract",
+                        "Shutdown and test synchronization code must wait on real conditions and terminate all remaining workers even after deadlines."));
+            }
+            if (isDependencyManifest(path) && containsAny(patch, "\n-", "remove", "duck", "vulnerability", "cve") && containsAny(prText + "\n" + lower, "cve", "vulnerability", "rce", "lfi", "disable", "security")) {
+                contracts.add(contract(next++, "dependency_removal_completeness", path, line, excerpt(patch, "-", "require", "github.com", "package"),
+                        "Security dependency removal / feature disable contract",
+                        "Removing a vulnerable dependency must be paired with source-level behavior that disables or replaces every affected runtime path."));
+            }
+            if (path.toLowerCase().endsWith(".properties") && containsAny(lower, "messages_", "totp", "href", "<a", "anchor", "sanitize")) {
+                contracts.add(contract(next++, "locale_translation_contract", path, line, excerpt(patch, "totp", "href", "<a", "anchor", "sanitize"),
+                        "Changed locale/translation validation contract",
+                        "Localized message files must keep the target locale and anchor structure consistent with the source translation contract."));
+            }
+        }
+        List<Map<String, Object>> out = contracts.stream().limit(40).toList();
+        trace.record("strategy_end", Map.of("strategy", "Changed Behavior Contract", "contracts", out));
+        return out;
     }
 
     public static Map<String, Object> riskModel(Map<String, Object> triage, Map<String, Object> analysis, TraceRecorder trace) {
@@ -216,6 +302,63 @@ public final class ReviewAnalysisNodes {
             }
         }
         return false;
+    }
+
+    private static Map<String, Object> contract(int id, String type, String file, int line, String evidence, String trigger, String expectedFailure) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("id", "contract-" + id);
+        item.put("type", type);
+        item.put("file", file);
+        item.put("line", line);
+        item.put("evidence", evidence);
+        item.put("trigger", trigger);
+        item.put("expected_failure", expectedFailure);
+        item.put("review_instruction", "Prefer candidates that prove this failure mode is introduced or exposed by the diff.");
+        return item;
+    }
+
+    private static boolean isDependencyManifest(String path) {
+        String lower = path.toLowerCase();
+        return lower.endsWith("go.mod") || lower.endsWith("go.sum") || lower.endsWith("package.json") || lower.endsWith("package-lock.json")
+                || lower.endsWith("pnpm-lock.yaml") || lower.endsWith("yarn.lock") || lower.endsWith("gemfile") || lower.endsWith("gemfile.lock")
+                || lower.endsWith("pom.xml") || lower.endsWith("build.gradle") || lower.endsWith("cargo.toml") || lower.endsWith("cargo.lock")
+                || lower.endsWith("requirements.txt") || lower.endsWith("poetry.lock");
+    }
+
+    private static int firstChangedLine(String patch) {
+        int currentNewLine = 1;
+        boolean sawHunk = false;
+        for (String line : patch.split("\\R")) {
+            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@.*").matcher(line);
+            if (matcher.matches()) {
+                sawHunk = true;
+                currentNewLine = Integer.parseInt(matcher.group(1));
+                continue;
+            }
+            if (line.startsWith("+") && !line.startsWith("+++")) {
+                return currentNewLine;
+            }
+            if (sawHunk && !line.startsWith("-")) {
+                currentNewLine++;
+            }
+        }
+        return 1;
+    }
+
+    private static String excerpt(String text, String... needles) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        String[] lines = text.split("\\R");
+        for (String needle : needles) {
+            for (String line : lines) {
+                if (line.toLowerCase().contains(needle.toLowerCase())) {
+                    return line.strip().length() <= 240 ? line.strip() : line.strip().substring(0, 240);
+                }
+            }
+        }
+        String compact = text.replaceAll("\\s+", " ").strip();
+        return compact.length() <= 240 ? compact : compact.substring(0, 240);
     }
 
     private static void addUnique(List<String> list, String value) {

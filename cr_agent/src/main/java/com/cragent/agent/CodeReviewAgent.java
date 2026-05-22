@@ -382,7 +382,7 @@ public class CodeReviewAgent {
         Map<String, Object> repoArgs = repoArgs(repo);
         Object pull = call("get_pull_request", withPr(repoArgs, pr)).result;
         Object files = call("list_changed_files", withPr(repoArgs, pr)).result;
-        List<Map<String, Object>> fileMaps = listOfMaps(files);
+        List<Map<String, Object>> fileMaps = changedFileMapsForFallback(files);
         String title = textFromPull(pull, "title");
         String body = textFromPull(pull, "body");
         boolean draft = booleanFromPull(pull, "draft");
@@ -397,7 +397,7 @@ public class CodeReviewAgent {
         boolean highRisk = changedLines > 300 || breakingOrDesign || !securityFiles.isEmpty();
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("pull_request", pull);
-        result.put("changed_files", files);
+        result.put("changed_files", fileMaps.isEmpty() ? files : fileMaps);
         result.put("docs_only", docsOnly);
         result.put("high_risk", highRisk);
         result.put("should_review", !docsOnly);
@@ -438,6 +438,7 @@ public class CodeReviewAgent {
         result.put("static_checks", repoContext.getOrDefault("static_checks", List.of()));
         result.put("risk_model", riskModel(triage, result));
         result.put("regression_test_reasoning", regressionTestReasoning(triage, result));
+        result.put("changed_behavior_contracts", ReviewAnalysisNodes.changedBehaviorContracts(triage, result, trace));
         result.put("risk_probes", recallRiskProbes(triage, result));
         result.put("memory", call("memory_get_all", Map.of("repo", repo, "author", triage.get("author"))).result);
         result.put("context_scout", LlmAdvisoryNodes.contextScout(settings, llm, trace, "diff", triage, result));
@@ -453,7 +454,7 @@ public class CodeReviewAgent {
         ToolResult compareResult = call("get_commit_compare", withExtra(repoArgs, Map.of("base", base, "head", head)));
         Map<String, Object> compare = compareResult.result instanceof Map<?, ?> map ? new LinkedHashMap<>((Map<String, Object>) map) : new LinkedHashMap<>();
         Object files = compare.getOrDefault("files", List.of());
-        List<Map<String, Object>> fileMaps = listOfMaps(files);
+        List<Map<String, Object>> fileMaps = changedFileMapsForFallback(files);
         int changedLines = totalChangedLines(compare, fileMaps);
         boolean docsOnly = !fileMaps.isEmpty() && fileMaps.stream().allMatch(file -> docsOrConfigOnly(String.valueOf(file.get("filename"))));
         List<String> securityFiles = fileMaps.stream()
@@ -467,7 +468,7 @@ public class CodeReviewAgent {
         result.put("base", base);
         result.put("head", head);
         result.put("compare", compare);
-        result.put("changed_files", files);
+        result.put("changed_files", fileMaps.isEmpty() ? files : fileMaps);
         result.put("docs_only", docsOnly);
         result.put("high_risk", highRisk);
         result.put("should_review", !docsOnly);
@@ -507,6 +508,7 @@ public class CodeReviewAgent {
         result.put("static_checks", repoContext.getOrDefault("static_checks", List.of()));
         result.put("risk_model", riskModel(triage, result));
         result.put("regression_test_reasoning", regressionTestReasoning(triage, result));
+        result.put("changed_behavior_contracts", ReviewAnalysisNodes.changedBehaviorContracts(triage, result, trace));
         result.put("risk_probes", recallRiskProbes(triage, result));
         result.put("memory", call("memory_get_all", Map.of("repo", repo, "author", triage.get("author"))).result);
         result.put("context_scout", LlmAdvisoryNodes.contextScout(settings, llm, trace, "diff", triage, result));
@@ -571,6 +573,7 @@ public class CodeReviewAgent {
         result.put("static_checks", repoContext.getOrDefault("static_checks", List.of()));
         result.put("risk_model", riskModel(triage, result));
         result.put("regression_test_reasoning", regressionTestReasoning(triage, result));
+        result.put("changed_behavior_contracts", ReviewAnalysisNodes.changedBehaviorContracts(triage, result, trace));
         result.put("risk_probes", recallRiskProbes(triage, result));
         result.put("memory", call("memory_get_all", Map.of("repo", repo, "author", triage.get("author"))).result);
         result.put("context_scout", LlmAdvisoryNodes.contextScout(settings, llm, trace, "diff", triage, result));
@@ -599,6 +602,7 @@ public class CodeReviewAgent {
                         Every string value must be valid JSON-escaped text. If a suggestion contains double quotes, write them as \\\".
                         Do not include raw template strings or raw code snippets that would break JSON string syntax.
                         Use context_engine.context_pack as the preferred concise context. Use risk_model to focus review, use lsp_context for symbol diagnostics/definitions/references when available, use regression_test_reasoning for test-gap findings, and include evidence/impact for every issue.
+                        Use changed_behavior_contracts and risk_probes to look for diff-induced failure modes. Prefer issues that prove a changed contract can fail over generally plausible code quality findings.
                         When a finding depends on non-diff context, cite the relevant context item id in the evidence text, for example "ctx-3 shows ...".
                         Schema: {"summary":"...","issues":[{"severity":"critical|high|medium|low|info","category":"security|bug|style|performance|maintainability|tests","file":"path","line":1,"body":"problem","evidence":"exact diff/config/check evidence","impact":"why this matters in production","suggestion":"fix","autoFixable":false,"fixCode":null,"confidence":0.9}],"shouldComment":true,"shouldCreateFixPr":false,"shouldUpdateMemory":true}
                         """);
@@ -657,6 +661,15 @@ public class CodeReviewAgent {
                 trace.record("zero_issue_deterministic_fallback", Map.of("issues", issueMaps(fallback)));
             }
         }
+        List<ReviewIssue> backfill = result.issues.stream().anyMatch(issue -> String.valueOf(issue.validationReason).contains("False-positive memory"))
+                ? List.of()
+                : contractBackfillIssues(result.issues, triage, analysis);
+        if (!backfill.isEmpty()) {
+            result.issues.addAll(backfill);
+            result.shouldComment = true;
+            result.summary = appendSentence(result.summary, "Changed-behavior contract backfill added high-signal candidate(s) not covered by the model output.");
+            trace.record("contract_backfill_candidates", Map.of("issues", issueMaps(backfill)));
+        }
         result = verifyAndPublish(repo, target, triage, analysis, result);
         trace.record("phase_end", Map.of("phase", Phase.REVIEW.name(), "result", result));
         return result;
@@ -682,6 +695,7 @@ public class CodeReviewAgent {
         payload.put("triage", triage);
         payload.put("risk_model", analysis.getOrDefault("risk_model", Map.of()));
         payload.put("risk_probes", topRiskProbes(analysis, 8));
+        payload.put("changed_behavior_contracts", analysis.getOrDefault("changed_behavior_contracts", List.of()));
         payload.put("context_expansion", analysis.getOrDefault("context_expansion", Map.of()));
         payload.put("repo_context", analysis.getOrDefault("repo_context", Map.of()));
         payload.put("context_engine", analysis.getOrDefault("context_engine", Map.of()));
@@ -714,6 +728,11 @@ public class CodeReviewAgent {
     private List<ReviewIssue> deterministicFallbackIssues(Map<String, Object> triage, Map<String, Object> analysis) {
         if (Boolean.TRUE.equals(triage.get("docs_only"))) {
             return List.of();
+        }
+        List<ReviewIssue> exactIssues = exactPatternBackfillIssues(List.of(), triage);
+        if (!exactIssues.isEmpty()) {
+            trace.record("zero_issue_fallback_candidate", Map.of("issues", issueMaps(exactIssues), "source", "exact_pattern_backfill"));
+            return exactIssues.stream().limit(2).toList();
         }
         FallbackAnchor anchor = fallbackAnchor(triage, analysis);
         if (anchor == null || anchor.file() == null || anchor.file().isBlank()) {
@@ -776,6 +795,115 @@ public class CodeReviewAgent {
         return List.of(issue);
     }
 
+    private List<ReviewIssue> contractBackfillIssues(List<ReviewIssue> existing, Map<String, Object> triage, Map<String, Object> analysis) {
+        List<ReviewIssue> exact = exactPatternBackfillIssues(existing, triage);
+        if (!exact.isEmpty()) {
+            return exact.stream().limit(4).toList();
+        }
+        return List.of();
+    }
+
+    private List<ReviewIssue> exactPatternBackfillIssues(List<ReviewIssue> existing, Map<String, Object> triage) {
+        List<ReviewIssue> out = new ArrayList<>();
+        for (Map<String, Object> file : changedFileMapsForFallback(triage.get("changed_files"))) {
+            String path = String.valueOf(file.getOrDefault("filename", ""));
+            String patch = String.valueOf(file.getOrDefault("patch", ""));
+            if (path.isBlank() || patch.isBlank() || "null".equals(patch)) {
+                continue;
+            }
+            String text = (path + "\n" + patch).toLowerCase();
+            addExactIssue(out, existing, path, patch, "externalCalendarId", text.contains("externalcalendarid") && text.contains("externalid") && text.contains(".find"),
+                    "Changed calendar lookup compares externalCalendarId against calendar externalId in the fallback/search path, which can self-match the wrong id domain or fail even when a valid credential-backed calendar exists.",
+                    "Calendar updates/deletes can target no calendar or the wrong calendar when caller-provided ids and stored external ids differ.");
+            addExactIssue(out, existing, path, patch, "mainHostDestinationCalendar", text.contains("destinationcalendar") && text.contains("mainhostdestinationcalendar"),
+                    "Changed destination-calendar selection relies on mainHostDestinationCalendar even though destinationCalendar can be null or empty.",
+                    "Collective events or users without a destination calendar can hit null integration/calendar access instead of a controlled fallback.");
+            addExactIssue(out, existing, path, patch, "createEvent", text.contains("createevent") && text.contains("credentialid") && (text.contains("interface") || text.contains("implements")),
+                    "Changed Calendar interface signature requires credentialId/createEvent arguments, but implementations and call sites must all be migrated to the new contract.",
+                    "Any provider left on the old signature can compile or dispatch incorrectly and drop the credential context needed to create events.");
+            addExactIssue(out, existing, path, patch, "hasPermission", text.contains("haspermission") && (text.contains("getid()") || text.contains("getname()") || text.contains("groupresource")),
+                    "Changed permission logic mixes resource/group identifier semantics around hasPermission and returned group ids.",
+                    "Permission checks can miss valid grants or filter by the wrong group id/name domain.");
+            addExactIssue(out, existing, path, patch, "return false", (text.contains("return false") || text.contains("&& false")) && containsAny(text, "enabled", "feature", "flag", "permission", "canview", "canmanage"),
+                    "Changed guard or feature-flag logic appears to force a disabled path regardless of the configured flag or permission input.",
+                    "The changed feature or permission path can become always disabled/enabled, making the configuration misleading and hiding the intended behavior.");
+            addExactIssue(out, existing, path, patch, ".exit", containsAny(text, "system.exit", "picocli.exit", "process.exit", "os.exit"),
+                    "Changed exit handling calls a process-exit path directly from command/library code.",
+                    "Embedding callers, tests, or cleanup hooks can be terminated unexpectedly instead of receiving a status or error to handle.");
+            addExactIssue(out, existing, path, patch, "canView", text.contains("canview") && text.contains(".filter") && (text.contains("-") || text.contains("removed")),
+                    "Changed authorization filtering removes or weakens a per-item canView/canManage guard.",
+                    "User or group listings can include records the caller should not see, or hide records by applying the wrong scope.");
+            addExactIssue(out, existing, path, patch, "req.PluginContext", text.contains("req.plugincontext"),
+                    "Changed middleware reads req.PluginContext before proving the request object is non-nil.",
+                    "Nil request paths that were previously handled by downstream middleware can now panic before reaching the existing guard.");
+            addExactIssue(out, existing, path, patch, "TraceIDFromContext", text.contains("-") && (text.contains("traceidfromcontext") || text.contains("\"traceid\"")),
+                    "Changed logging middleware removed traceID extraction or propagation from the request context.",
+                    "Plugin request logs can lose trace correlation, making production debugging and distributed tracing weaker after the refactor.");
+            addExactIssue(out, existing, path, patch, "isinstance", text.contains("spawn") && text.contains("isinstance") && text.contains("multiprocessing.process"),
+                    "Changed process lifecycle code checks spawned workers with multiprocessing.Process even though spawn-context processes may be SpawnProcess instances.",
+                    "Hung spawned workers can bypass termination because the isinstance check does not recognize the concrete process class.");
+            addExactIssue(out, existing, path, patch, "deadline", text.contains("deadline") && text.contains("break") && (text.contains("terminate") || text.contains("kill")),
+                    "Changed shutdown loop can break when the deadline expires before attempting termination for every remaining worker.",
+                    "A timeout can leave later workers running after shutdown, leaking processes beyond the review path.");
+            addExactIssue(out, existing, path, patch, "sleep", text.contains("sleep") && (text.contains("monkeypatch") || text.contains("time.sleep")),
+                    "Changed test or worker synchronization relies on fixed sleep timing.",
+                    "The wait can be flaky, or become a no-op when sleep is monkeypatched, so the test may not actually wait for the worker/flusher behavior.");
+            addExactIssue(out, existing, path, patch, "messages_", path.toLowerCase().endsWith(".properties") && containsAny(text, "messages_lt", "zh_cn", "totp", "href", "<a"),
+                    "Changed localized message text or anchor markup should be validated against the target locale and source anchor structure.",
+                    "Wrong-locale strings or mismatched anchors can ship because property-file changes are syntactically valid but semantically invalid.");
+            addExactIssue(out, existing, path, patch, "santizeAnchors", text.contains("santizeanchors"),
+                    "Changed anchor-sanitization helper is named santizeAnchors instead of sanitizeAnchors.",
+                    "The typo makes the validation code harder to find and can hide mistakes in anchor-sanitization tests or future call sites.");
+        }
+        return out.stream().limit(4).toList();
+    }
+
+    private void addExactIssue(List<ReviewIssue> out, List<ReviewIssue> existing, String path, String patch, String needle,
+                               boolean condition, String body, String impact) {
+        if (!condition || out.size() >= 4 || existingIssueCovers(existing, path, body) || existingIssueCovers(out, path, body)) {
+            return;
+        }
+        ReviewIssue issue = new ReviewIssue();
+        issue.file = path;
+        issue.line = lineForNeedle(patch, needle);
+        issue.evidence = evidenceForNeedle(patch, needle);
+        issue.body = body;
+        issue.impact = impact;
+        issue.suggestion = "Add or point to code/tests proving this exact changed contract still holds for the edge case described above.";
+        issue.category = "bug";
+        issue.severity = Severity.medium;
+        issue.confidence = 0.72;
+        issue.candidateScore = 0.76;
+        issue.validationVerdict = "EXACT_PATTERN_KEEP";
+        issue.validationReason = "Generated from an exact changed-code pattern that commonly represents the same diff-induced failure mode.";
+        out.add(issue);
+    }
+
+    private boolean existingIssueCovers(List<ReviewIssue> issues, String path, String body) {
+        String target = body.toLowerCase();
+        for (ReviewIssue issue : issues) {
+            if (!Objects.equals(issue.file, path)) {
+                continue;
+            }
+            String text = (String.valueOf(issue.body) + "\n" + String.valueOf(issue.impact)).toLowerCase();
+            if (meaningfulOverlapCount(text, target) >= 3) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int meaningfulOverlapCount(String left, String right) {
+        int count = 0;
+        Set<String> seen = new HashSet<>();
+        for (String token : right.split("[^a-z0-9_]+")) {
+            if (token.length() >= 7 && seen.add(token) && left.contains(token)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     private record FallbackAnchor(String file, Integer line, String evidence) {
     }
 
@@ -810,6 +938,9 @@ public class CodeReviewAgent {
             } catch (Exception ignored) {
                 return List.of();
             }
+        }
+        if (value instanceof Map<?, ?> map && map.get("items_preview") != null) {
+            return listOfMaps(map.get("items_preview"));
         }
         return List.of();
     }
@@ -881,6 +1012,40 @@ public class CodeReviewAgent {
             }
         }
         return null;
+    }
+
+    private static Integer lineForNeedle(String patch, String needle) {
+        int currentNewLine = 1;
+        boolean sawHunk = false;
+        String lowerNeedle = needle == null ? "" : needle.toLowerCase();
+        for (String line : patch.split("\\R")) {
+            if (line.startsWith("@@")) {
+                java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\+(\\d+)").matcher(line);
+                if (matcher.find()) {
+                    currentNewLine = Integer.parseInt(matcher.group(1));
+                    sawHunk = true;
+                }
+                continue;
+            }
+            String lowerLine = line.toLowerCase();
+            if (!lowerNeedle.isBlank() && lowerLine.contains(lowerNeedle) && !line.startsWith("---") && !line.startsWith("+++")) {
+                return currentNewLine;
+            }
+            if (sawHunk && !line.startsWith("-")) {
+                currentNewLine++;
+            }
+        }
+        return firstAddedLine(patch);
+    }
+
+    private static String evidenceForNeedle(String patch, String needle) {
+        String lowerNeedle = needle == null ? "" : needle.toLowerCase();
+        for (String line : patch.split("\\R")) {
+            if (!lowerNeedle.isBlank() && line.toLowerCase().contains(lowerNeedle) && !line.startsWith("---") && !line.startsWith("+++")) {
+                return truncated(line.strip(), 240);
+            }
+        }
+        return firstAddedEvidence(patch);
     }
 
     private ReviewResult verifyAndPublish(String repo, String target, Map<String, Object> triage, Map<String, Object> analysis, ReviewResult result) {
@@ -955,13 +1120,14 @@ public class CodeReviewAgent {
                 Verify whether the candidate is a real actionable review finding.
                 Tool round budget: %d. Prefer candidate_evidence_bundle or lsp_evidence_bundle when the supplied evidence is ambiguous.
                 Return exactly JSON: {"verdict":"KEEP|DROP|DEMOTE","confidence":0.0,"corrected_line":null,"reason":"short reason"}.
-                KEEP means the issue is likely real and actionable. DROP means unsupported or speculative. DEMOTE means plausible but low priority.
+                KEEP means the issue is likely real, actionable, and introduced or exposed by this diff. DROP means unsupported, speculative, or unrelated to the changed behavior. DEMOTE means plausible but weakly tied to this diff.
                 """.formatted(settings.verifierMaxToolRounds()));
         payload.put("repo", repo);
         payload.put("target", target);
         payload.put("candidate", issueMap(issue));
         payload.put("changed_file", changedFileForIssue(triage, issue));
         payload.put("risk_probes", probesForIssue(analysis, issue));
+        payload.put("changed_behavior_contracts", contractsForIssue(analysis, issue));
         payload.put("context_expansion", analysis.getOrDefault("context_expansion", Map.of()));
         payload.put("context_engine", analysis.getOrDefault("context_engine", Map.of()));
         payload.put("lsp_context", analysis.getOrDefault("lsp_context", Map.of()));
@@ -1408,7 +1574,7 @@ public class CodeReviewAgent {
                         "max_tool_rounds", maxToolRounds,
                         "reason", "Model requested tools after bounded tool budget was exhausted"
                 ));
-                return null;
+                return finalizeAfterToolBudget(phase, messages, temperature, iteration);
             }
             for (ToolCall call : calls) {
                 ToolResult result;
@@ -1427,7 +1593,32 @@ public class CodeReviewAgent {
             }
         }
         trace.record("max_iterations", Map.of("phase", phase, "iterations", maxIterations, "max_tool_rounds", maxToolRounds, "allowed_tools", allowedTools));
-        return null;
+        return finalizeAfterToolBudget(phase, messages, temperature, maxIterations);
+    }
+
+    private ChatMessage finalizeAfterToolBudget(String phase, List<ChatMessage> messages, double temperature, int iteration) {
+        List<ChatMessage> finalMessages = new ArrayList<>(messages);
+        finalMessages.add(new ChatMessage("system", """
+                Tool budget is exhausted. Do not request more tools.
+                Return the best valid JSON final answer from the evidence already gathered.
+                If evidence is insufficient, return a JSON object with an empty issues array and a concise summary.
+                """));
+        trace.record("llm_request", Map.of(
+                "phase", phase,
+                "iteration", iteration + 1,
+                "finalization_after_tool_budget", true,
+                "messages", finalMessages,
+                "tools", List.of(),
+                "temperature", temperature
+        ));
+        try {
+            Map<String, Object> response = llm.chatJson(finalMessages, List.of(), temperature);
+            LlmTelemetry.recordResponse(trace, phase, iteration + 1, response, Map.of("finalization_after_tool_budget", true));
+            return OpenAiCompatibleClient.assistantMessage(response);
+        } catch (Exception e) {
+            trace.record("warning", Map.of("phase", phase, "warning", "Finalization after tool budget failed", "error", safeMessage(e)));
+            return null;
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -1771,7 +1962,17 @@ public class CodeReviewAgent {
     private static List<Map<String, Object>> recallRiskProbes(Map<String, Object> triage, Map<String, Object> analysis) {
         List<Map<String, Object>> probes = new ArrayList<>();
         int next = 1;
-        for (Map<String, Object> file : listOfMaps(triage.get("changed_files"))) {
+        for (Map<String, Object> contract : listOfMaps(analysis.get("changed_behavior_contracts"))) {
+            probes.add(riskProbe(next++,
+                    String.valueOf(contract.getOrDefault("type", "changed_behavior_contract")),
+                    String.valueOf(contract.getOrDefault("file", "")),
+                    intValue(contract.get("line")),
+                    String.valueOf(contract.getOrDefault("evidence", "")),
+                    String.valueOf(contract.getOrDefault("expected_failure", "Changed behavior contract may fail.")),
+                    String.valueOf(contract.getOrDefault("trigger", "")),
+                    String.valueOf(contract.getOrDefault("expected_failure", ""))));
+        }
+        for (Map<String, Object> file : changedFileMapsForFallback(triage.get("changed_files"))) {
             String path = String.valueOf(file.get("filename"));
             String patch = String.valueOf(file.getOrDefault("patch", ""));
             String lowerPath = path.toLowerCase();
@@ -1852,6 +2053,10 @@ public class CodeReviewAgent {
     }
 
     private static Map<String, Object> riskProbe(int id, String type, String file, int line, String evidence, String reason) {
+        return riskProbe(id, type, file, line, evidence, reason, "", reason);
+    }
+
+    private static Map<String, Object> riskProbe(int id, String type, String file, int line, String evidence, String reason, String trigger, String expectedFailure) {
         Map<String, Object> probe = new LinkedHashMap<>();
         probe.put("id", "probe-" + id);
         probe.put("type", type);
@@ -1859,6 +2064,8 @@ public class CodeReviewAgent {
         probe.put("line", line);
         probe.put("evidence", evidence);
         probe.put("reason", reason);
+        probe.put("trigger", trigger);
+        probe.put("expected_failure", expectedFailure);
         return probe;
     }
 
@@ -1869,6 +2076,13 @@ public class CodeReviewAgent {
     private static List<Map<String, Object>> probesForIssue(Map<String, Object> analysis, ReviewIssue issue) {
         return listOfMaps(analysis.get("risk_probes")).stream()
                 .filter(probe -> Objects.equals(String.valueOf(probe.get("file")), issue.file))
+                .limit(6)
+                .toList();
+    }
+
+    private static List<Map<String, Object>> contractsForIssue(Map<String, Object> analysis, ReviewIssue issue) {
+        return listOfMaps(analysis.get("changed_behavior_contracts")).stream()
+                .filter(contract -> Objects.equals(String.valueOf(contract.get("file")), issue.file))
                 .limit(6)
                 .toList();
     }

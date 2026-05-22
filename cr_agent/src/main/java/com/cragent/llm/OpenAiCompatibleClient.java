@@ -20,12 +20,17 @@ import java.util.concurrent.TimeUnit;
 
 public class OpenAiCompatibleClient implements LlmClient {
     private final Settings settings;
-    private final HttpClient client = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(30))
-            .build();
+    private final HttpClient client;
 
     public OpenAiCompatibleClient(Settings settings) {
+        this(settings, HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(Math.min(60, Math.max(5, settings.llmTimeoutSeconds()))))
+                .build());
+    }
+
+    OpenAiCompatibleClient(Settings settings, HttpClient client) {
         this.settings = settings;
+        this.client = client;
     }
 
     @Override
@@ -58,20 +63,28 @@ public class OpenAiCompatibleClient implements LlmClient {
             payload.put("response_format", Map.of("type", "json_object"));
         }
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(settings.openaiBaseUrl().replaceAll("/$", "") + "/chat/completions"))
-                .timeout(Duration.ofSeconds(Math.max(1, settings.llmTimeoutSeconds())))
-                .header("Authorization", "Bearer " + settings.openaiApiKey())
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(Jsons.stringify(payload)))
-                .build();
-        return Retry.run("LLM request", () -> {
+        String body = Jsons.stringify(payload);
+        URI uri = URI.create(settings.openaiBaseUrl().replaceAll("/$", "") + "/chat/completions");
+        Retry.RetryPolicy policy = Retry.policy(
+                settings.llmRetryMaxAttempts(),
+                settings.llmRetryInitialBackoffMillis(),
+                settings.llmRetryMaxBackoffMillis()
+        );
+        return Retry.run("LLM request", policy, () -> {
             int timeoutSeconds = Math.max(1, settings.llmTimeoutSeconds());
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(uri)
+                    .timeout(Duration.ofSeconds(timeoutSeconds))
+                    .header("Authorization", "Bearer " + settings.openaiApiKey())
+                    .header("api-key", settings.openaiApiKey())
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
             HttpResponse<String> response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                     .get(timeoutSeconds, TimeUnit.SECONDS);
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 if (Retry.retryableStatus(response.statusCode())) {
-                    throw new IOException("LLM retryable HTTP " + response.statusCode() + " " + response.body());
+                    throw new RetryableLlmHttpException(response.statusCode(), response.body(), retryAfterMillis(response));
                 }
                 throw new IllegalStateException("LLM request failed: HTTP " + response.statusCode() + " " + response.body());
             }
@@ -81,7 +94,64 @@ public class OpenAiCompatibleClient implements LlmClient {
             } catch (IOException e) {
                 throw new IllegalStateException("Unable to parse LLM response", e);
             }
+        }, (attempt, error) -> {
+            long providerDelay = retryAfterMillis(error);
+            if (providerDelay > 0) {
+                sleep(providerDelay);
+            }
         });
+    }
+
+    private static long retryAfterMillis(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof RetryableLlmHttpException retryable) {
+                return retryable.retryAfterMillis();
+            }
+            current = current.getCause();
+        }
+        return 0L;
+    }
+
+    private static long retryAfterMillis(HttpResponse<?> response) {
+        return response.headers().firstValue("retry-after")
+                .map(String::trim)
+                .flatMap(value -> {
+                    try {
+                        return java.util.Optional.of(Math.max(0L, Long.parseLong(value) * 1000L));
+                    } catch (NumberFormatException e) {
+                        return java.util.Optional.empty();
+                    }
+                })
+                .orElse(0L);
+    }
+
+    private static void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("LLM retry-after sleep interrupted", e);
+        }
+    }
+
+    private static final class RetryableLlmHttpException extends IOException {
+        private final int statusCode;
+        private final long retryAfterMillis;
+
+        private RetryableLlmHttpException(int statusCode, String body, long retryAfterMillis) {
+            super("LLM retryable HTTP " + statusCode + " " + body);
+            this.statusCode = statusCode;
+            this.retryAfterMillis = retryAfterMillis;
+        }
+
+        int statusCode() {
+            return statusCode;
+        }
+
+        long retryAfterMillis() {
+            return retryAfterMillis;
+        }
     }
 
     private Map<String, Object> messageToMap(ChatMessage message) {

@@ -226,6 +226,8 @@ public final class EvidenceValidationNode {
     private static double candidateScore(ReviewIssue issue, EvidenceScore evidence, Map<String, Object> analysis) {
         double score = 0.18 + (Math.max(0.0, Math.min(1.0, issue.confidence)) * 0.28);
         score += evidence.total() * 0.32;
+        double contractAlignment = contractAlignmentScore(issue, analysis);
+        score += contractAlignment * 0.24;
         if (isHighSignalCategory(issue)) {
             score += 0.12;
         }
@@ -237,6 +239,12 @@ public final class EvidenceValidationNode {
         }
         if ("style".equals(issue.category) || "maintainability".equals(issue.category)) {
             score -= 0.12;
+        }
+        if (contractAlignment == 0.0 && unrelatedPlausibleFinding(issue)) {
+            score -= 0.14;
+            issue.validationReason = appendReason(issue.validationReason, "Candidate was demoted because it is plausible but weakly tied to a changed behavior contract.");
+        } else if (contractAlignment >= 0.45) {
+            issue.validationReason = appendReason(issue.validationReason, "Candidate aligns with a changed behavior contract.");
         }
         return Math.max(0.0, Math.min(1.0, score));
     }
@@ -296,6 +304,61 @@ public final class EvidenceValidationNode {
         boolean fileNamed = files instanceof List<?> list && list.stream().anyMatch(item -> Objects.equals(String.valueOf(item), issue.file));
         String text = (issue.body + "\n" + issue.evidence + "\n" + issue.impact).toLowerCase();
         return likelyGap && fileNamed && containsAny(text, "untested", "test", "regression", "coverage", "case");
+    }
+
+    private static double contractAlignmentScore(ReviewIssue issue, Map<String, Object> analysis) {
+        List<Map<String, Object>> contracts = listOfMaps(analysis.get("changed_behavior_contracts"));
+        if (contracts.isEmpty()) {
+            return 0.0;
+        }
+        String issueText = (nullToEmpty(issue.category) + "\n" + nullToEmpty(issue.body) + "\n" + nullToEmpty(issue.evidence)
+                + "\n" + nullToEmpty(issue.impact) + "\n" + nullToEmpty(issue.suggestion)).toLowerCase();
+        double best = 0.0;
+        for (Map<String, Object> contract : contracts) {
+            if (!Objects.equals(String.valueOf(contract.getOrDefault("file", "")), issue.file)) {
+                continue;
+            }
+            double score = 0.25;
+            String type = String.valueOf(contract.getOrDefault("type", "")).toLowerCase();
+            String trigger = String.valueOf(contract.getOrDefault("trigger", "")).toLowerCase();
+            String failure = String.valueOf(contract.getOrDefault("expected_failure", "")).toLowerCase();
+            String evidence = String.valueOf(contract.getOrDefault("evidence", "")).toLowerCase();
+            if (sharesToken(issueText, type.replace('_', ' '))) score += 0.18;
+            if (sharesToken(issueText, trigger)) score += 0.2;
+            if (sharesToken(issueText, failure)) score += 0.25;
+            if (!evidence.isBlank() && containsNormalized(issueText, evidence)) score += 0.12;
+            best = Math.max(best, Math.min(1.0, score));
+        }
+        return best;
+    }
+
+    private static boolean unrelatedPlausibleFinding(ReviewIssue issue) {
+        String text = (nullToEmpty(issue.body) + "\n" + nullToEmpty(issue.evidence) + "\n" + nullToEmpty(issue.impact)).toLowerCase();
+        return containsAny(text, "unused import", "style", "unconventional", "consider", "could be", "may be", "n+1", "sql injection", "mass-assignment")
+                && !containsAny(text, "nil", "null", "panic", "always", "false", "true", "normaliz", "case", "missing required", "trace", "context", "exit", "deadline", "terminate");
+    }
+
+    private static boolean sharesToken(String left, String right) {
+        if (left == null || right == null || right.isBlank()) {
+            return false;
+        }
+        for (String token : right.toLowerCase().split("[^a-z0-9_]+")) {
+            if (token.length() >= 5 && left.contains(token)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String appendReason(String current, String addition) {
+        if (addition == null || addition.isBlank()) {
+            return current;
+        }
+        String base = current == null ? "" : current.strip();
+        if (base.isBlank()) {
+            return addition;
+        }
+        return base.endsWith(".") ? base + " " + addition : base + ". " + addition;
     }
 
     private static Severity calibratedSeverity(ReviewIssue issue, Map<String, Object> analysis) {

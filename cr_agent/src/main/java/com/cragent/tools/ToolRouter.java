@@ -71,7 +71,34 @@ public class ToolRouter {
         if (text.length() <= maxResultChars) {
             return new Truncated(value, false);
         }
+        if (value instanceof List<?> list) {
+            return new Truncated(truncatedListPreview(list, text.length()), true);
+        }
         return new Truncated(Map.of("truncated", true, "preview", text.substring(0, maxResultChars), "original_chars", text.length()), true);
+    }
+
+    private Map<String, Object> truncatedListPreview(List<?> list, int originalChars) {
+        java.util.ArrayList<Object> previewItems = new java.util.ArrayList<>();
+        int budget = Math.max(256, maxResultChars - 256);
+        for (Object item : list) {
+            java.util.ArrayList<Object> candidate = new java.util.ArrayList<>(previewItems);
+            candidate.add(item);
+            if (!previewItems.isEmpty() && Jsons.stringify(candidate).length() > budget) {
+                break;
+            }
+            if (Jsons.stringify(candidate).length() > budget && previewItems.isEmpty()) {
+                previewItems.add(item);
+                break;
+            }
+            previewItems.add(item);
+        }
+        return Map.of(
+                "truncated", true,
+                "items_preview", previewItems,
+                "preview_count", previewItems.size(),
+                "total_items", list.size(),
+                "original_chars", originalChars
+        );
     }
 
     private record Truncated(Object value, boolean truncated) {
