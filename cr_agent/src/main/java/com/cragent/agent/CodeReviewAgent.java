@@ -1066,19 +1066,24 @@ public class CodeReviewAgent {
                 .collect(Collectors.toCollection(ArrayList::new));
         boolean fallbackPublished = false;
         if (published.isEmpty() && !publishable.isEmpty()) {
-            fallbackPublished = true;
-            int fallbackCount = Math.min(publishable.size(), Math.min(2, maxComments));
-            published = publishable.stream()
-                    .limit(fallbackCount)
+            List<ReviewIssue> plausibleFallbacks = publishable.stream()
+                    .filter(issue -> issue.candidateScore >= 0.28)
                     .collect(Collectors.toCollection(ArrayList::new));
-            for (ReviewIssue issue : published) {
-                if (nullToEmpty(issue.validationVerdict).isBlank()) {
-                    issue.validationVerdict = "PUBLISH_FALLBACK";
+            if (!plausibleFallbacks.isEmpty()) {
+                fallbackPublished = true;
+                int fallbackCount = Math.min(plausibleFallbacks.size(), Math.min(2, maxComments));
+                published = plausibleFallbacks.stream()
+                        .limit(fallbackCount)
+                        .collect(Collectors.toCollection(ArrayList::new));
+                for (ReviewIssue issue : published) {
+                    if (nullToEmpty(issue.validationVerdict).isBlank()) {
+                        issue.validationVerdict = "PUBLISH_FALLBACK";
+                    }
+                    String reason = nullToEmpty(issue.validationReason);
+                    issue.validationReason = reason.isBlank()
+                            ? "Published by high-recall fallback because no non-DROP candidate crossed the publication threshold, but score was plausible."
+                            : reason + " Published by high-recall fallback because no non-DROP candidate crossed the publication threshold.";
                 }
-                String reason = nullToEmpty(issue.validationReason);
-                issue.validationReason = reason.isBlank()
-                        ? "Published by high-recall fallback because no non-DROP candidate crossed the publication threshold."
-                        : reason + " Published by high-recall fallback because no non-DROP candidate crossed the publication threshold.";
             }
         }
         trace.record("candidate_publish", Map.of(
@@ -1117,10 +1122,11 @@ public class CodeReviewAgent {
                                       Map<String, Object> analysis, ReviewIssue issue) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("instruction", """
-                Verify whether the candidate is a real actionable review finding.
-                Tool round budget: %d. Prefer candidate_evidence_bundle or lsp_evidence_bundle when the supplied evidence is ambiguous.
-                Return exactly JSON: {"verdict":"KEEP|DROP|DEMOTE","confidence":0.0,"corrected_line":null,"reason":"short reason"}.
-                KEEP means the issue is likely real, actionable, and introduced or exposed by this diff. DROP means unsupported, speculative, or unrelated to the changed behavior. DEMOTE means plausible but weakly tied to this diff.
+                You are an extremely strict, highly skeptical senior principal engineer verifying a code review candidate.
+                Your goal is to eliminate False Positives. Assume the candidate is a FALSE POSITIVE unless proven otherwise by concrete code evidence in the diff.
+                DROP the candidate if it is: 1) a minor stylistic nitpick, 2) speculative/guessing about missing logic without proof, 3) an existing pre-existing issue not introduced by this PR, 4) hallucinated code.
+                Tool round budget: %d. Use candidate_evidence_bundle to verify if the line actually changed.
+                Return exactly JSON: {"verdict":"KEEP|DROP|DEMOTE","confidence":0.0,"corrected_line":null,"reason":"strict justification"}.
                 """.formatted(settings.verifierMaxToolRounds()));
         payload.put("repo", repo);
         payload.put("target", target);
@@ -1133,7 +1139,7 @@ public class CodeReviewAgent {
         payload.put("lsp_context", analysis.getOrDefault("lsp_context", Map.of()));
         payload.put("static_checks", analysis.getOrDefault("static_checks", List.of()));
         List<ChatMessage> messages = new ArrayList<>(List.of(
-                new ChatMessage("system", "You are a code review candidate verifier. Be evidence-driven and concise."),
+                new ChatMessage("system", "You are an extremely strict code review candidate verifier. Assume everything is a false positive unless empirically proven."),
                 new ChatMessage("user", Jsons.stringify(payload))
         ));
         trace.record("candidate_verifier_start", Map.of("candidate", issueMap(issue), "allowed_tools", VERIFIER_TOOLS));
@@ -1195,10 +1201,12 @@ public class CodeReviewAgent {
         if ("style".equals(issue.category) || "maintainability".equals(issue.category)) {
             return verifierConfidence < 0.75 && scoreBeforeVerification >= 0.5;
         }
-        return isHighSignalCandidate(issue)
-                || "tests".equals(issue.category)
-                || verifierConfidence < 0.85
-                || scoreBeforeVerification >= 0.55;
+        boolean isHighSignal = isHighSignalCandidate(issue) || "tests".equals(issue.category);
+        if (isHighSignal) {
+            // Only soft drop if the verifier is not extremely confident, or if it had a very high initial score.
+            return verifierConfidence < 0.85 || scoreBeforeVerification >= 0.55;
+        }
+        return verifierConfidence < 0.75 || scoreBeforeVerification >= 0.65;
     }
 
     private static boolean isHighSignalCandidate(ReviewIssue issue) {

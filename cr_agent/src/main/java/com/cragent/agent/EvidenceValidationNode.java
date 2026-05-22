@@ -246,6 +246,10 @@ public final class EvidenceValidationNode {
         } else if (contractAlignment >= 0.45) {
             issue.validationReason = appendReason(issue.validationReason, "Candidate aligns with a changed behavior contract.");
         }
+        if (!evidence.lineValid() && !evidence.evidenceMatchesChangedLine() && !evidence.evidenceMatchesPatch()) {
+            score -= 0.35;
+            issue.validationReason = appendReason(issue.validationReason, "Candidate heavily penalized because neither the line number nor the evidence text could be found in the PR diff.");
+        }
         return Math.max(0.0, Math.min(1.0, score));
     }
 
