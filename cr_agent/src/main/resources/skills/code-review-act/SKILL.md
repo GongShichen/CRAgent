@@ -76,8 +76,10 @@ memory_get_developer_profile(author=pr_info.author)
       "category": "security|bug|style|performance",
       "file": "文件路径",
       "line": 行号（必须是 diff 中实际变更的行，否则填 null）,
+      "evidence": "【防幻觉必填】从 diff 中原封不动复制导致该问题的 1-2 行核心代码（严格一字不差。如果代码中根本不存在这段逻辑，说明是你的幻觉，请直接放弃提出该 issue）",
       "description": "问题描述",
       "suggestion": "修复建议",
+      "confidence": 0.9,
       "auto_fixable": true|false,
       "fix_code": "【重要】若 auto_fixable=true，提供修复后的【完整文件内容】（不是代码片段）。若 auto_fixable=false，填 null。"
     }

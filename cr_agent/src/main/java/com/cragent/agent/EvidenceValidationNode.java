@@ -247,8 +247,9 @@ public final class EvidenceValidationNode {
             issue.validationReason = appendReason(issue.validationReason, "Candidate aligns with a changed behavior contract.");
         }
         if (!evidence.lineValid() && !evidence.evidenceMatchesChangedLine() && !evidence.evidenceMatchesPatch()) {
-            score -= 0.35;
+            score -= 0.65;
             issue.validationReason = appendReason(issue.validationReason, "Candidate heavily penalized because neither the line number nor the evidence text could be found in the PR diff.");
+            issue.confidence = Math.min(issue.confidence, 0.4);
         }
         return Math.max(0.0, Math.min(1.0, score));
     }
@@ -615,11 +616,16 @@ public final class EvidenceValidationNode {
         if (value == null) {
             return "";
         }
-        String text = value.strip();
-        if (text.startsWith("+") || text.startsWith("-")) {
-            text = text.substring(1).strip();
+        String[] lines = value.split("\\R");
+        StringBuilder sb = new StringBuilder();
+        for (String line : lines) {
+            String stripped = line.strip();
+            if (stripped.startsWith("+") || stripped.startsWith("-")) {
+                stripped = stripped.substring(1).strip();
+            }
+            sb.append(stripped).append(" ");
         }
-        return text.replaceAll("\\s+", " ").strip().toLowerCase();
+        return sb.toString().replaceAll("\\s+", " ").strip().toLowerCase();
     }
 
     @SuppressWarnings("unchecked")

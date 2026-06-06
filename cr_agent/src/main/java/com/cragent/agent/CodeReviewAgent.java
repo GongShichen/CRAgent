@@ -604,7 +604,7 @@ public class CodeReviewAgent {
                         Use context_engine.context_pack as the preferred concise context. Use risk_model to focus review, use lsp_context for symbol diagnostics/definitions/references when available, use regression_test_reasoning for test-gap findings, and include evidence/impact for every issue.
                         Use changed_behavior_contracts and risk_probes to look for diff-induced failure modes. Prefer issues that prove a changed contract can fail over generally plausible code quality findings.
                         When a finding depends on non-diff context, cite the relevant context item id in the evidence text, for example "ctx-3 shows ...".
-                        Schema: {"summary":"...","issues":[{"severity":"critical|high|medium|low|info","category":"security|bug|style|performance|maintainability|tests","file":"path","line":1,"body":"problem","evidence":"exact diff/config/check evidence","impact":"why this matters in production","suggestion":"fix","autoFixable":false,"fixCode":null,"confidence":0.9}],"shouldComment":true,"shouldCreateFixPr":false,"shouldUpdateMemory":true}
+                        Schema: {"pr_analysis":"Deep Chain-of-Thought analyzing the PR's core intent, architectural changes, and potential edge cases/hidden risks before listing issues","summary":"...","issues":[{"reasoning":"Step-by-step logic proving this is a real defect based on diff context","severity":"critical|high|medium|low|info","category":"security|bug|style|performance|maintainability|tests","file":"path","line":1,"body":"problem","evidence":"MUST copy-paste the exact 1-2 lines of code from the diff that proves this issue. If not in the diff, you MUST NOT report this issue.","impact":"why this matters in production","suggestion":"fix","autoFixable":false,"fixCode":null,"confidence":0.9}],"shouldComment":true,"shouldCreateFixPr":false,"shouldUpdateMemory":true}
                         """);
         reviewPayload.put("repo", repo);
         reviewPayload.put("target", target);
@@ -688,7 +688,7 @@ public class CodeReviewAgent {
                 You may call only the provided recovery tools. Tool round budget: %d.
                 Use tools only to confirm a high-signal risk probe with surrounding code, callers, tests, or LSP evidence.
                 Return at most 3 high-signal bug/security/performance/test-gap issues as valid JSON.
-                Schema: {"summary":"...","issues":[{"severity":"critical|high|medium|low|info","category":"security|bug|performance|tests|maintainability","file":"path","line":1,"body":"problem","evidence":"specific changed hunk or context","impact":"why this matters","suggestion":"fix","confidence":0.0}],"shouldComment":true}
+                Schema: {"pr_analysis":"Deep Chain-of-Thought analyzing the PR's core intent, architectural changes, and potential edge cases/hidden risks before listing issues","summary":"...","issues":[{"reasoning":"Step-by-step logic proving this is a real defect based on diff context","severity":"critical|high|medium|low|info","category":"security|bug|performance|tests|maintainability","file":"path","line":1,"body":"problem","evidence":"MUST copy-paste the exact 1-2 lines of code from the diff that proves this issue. If not in the diff, you MUST NOT report this issue.","impact":"why this matters","suggestion":"fix","confidence":0.0}],"shouldComment":true}
                 """.formatted(settings.recoveryMaxToolRounds()));
         payload.put("repo", repo);
         payload.put("target", target);
@@ -1052,7 +1052,7 @@ public class CodeReviewAgent {
         List<ReviewIssue> candidates = new ArrayList<>(result.issues);
         if (settings.verifierEnabled() && !candidates.isEmpty()) {
             trace.record("phase_start", Map.of("phase", "CANDIDATE_VERIFIER", "candidates", candidates.size()));
-            candidates = verifyCandidates(repo, target, triage, analysis, candidates);
+            candidates = verifyCandidates(repo, target, triage, analysis, result);
             trace.record("phase_end", Map.of("phase", "CANDIDATE_VERIFIER", "candidates", candidates.size()));
         }
         List<ReviewIssue> publishable = candidates.stream()
@@ -1100,8 +1100,8 @@ public class CodeReviewAgent {
     }
 
     private List<ReviewIssue> verifyCandidates(String repo, String target, Map<String, Object> triage,
-                                               Map<String, Object> analysis, List<ReviewIssue> candidates) {
-        List<ReviewIssue> ordered = candidates.stream()
+                                               Map<String, Object> analysis, ReviewResult reviewResult) {
+        List<ReviewIssue> ordered = reviewResult.issues.stream()
                 .sorted(Comparator.comparingDouble((ReviewIssue issue) -> issue.candidateScore).reversed())
                 .collect(Collectors.toCollection(ArrayList::new));
         int verified = 0;
@@ -1113,23 +1113,25 @@ public class CodeReviewAgent {
                 continue;
             }
             verified++;
-            applyVerifierVerdict(repo, target, triage, analysis, issue);
+            applyVerifierVerdict(repo, target, triage, analysis, issue, reviewResult);
         }
         return ordered;
     }
 
     private void applyVerifierVerdict(String repo, String target, Map<String, Object> triage,
-                                      Map<String, Object> analysis, ReviewIssue issue) {
+                                      Map<String, Object> analysis, ReviewIssue issue, ReviewResult reviewResult) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("instruction", """
                 You are an extremely strict, highly skeptical senior principal engineer verifying a code review candidate.
-                Your goal is to eliminate False Positives. Assume the candidate is a FALSE POSITIVE unless proven otherwise by concrete code evidence in the diff.
-                DROP the candidate if it is: 1) a minor stylistic nitpick, 2) speculative/guessing about missing logic without proof, 3) an existing pre-existing issue not introduced by this PR, 4) hallucinated code.
+                Your goal is to eliminate False Positives while preserving True Positives.
+                DROP the candidate if it is: 1) a minor stylistic nitpick, 2) an existing pre-existing issue not introduced by this PR, 3) hallucinated code.
+                DEMOTE the candidate if it is plausible but weakly evidenced. KEEP if it correctly identifies a logic error, security risk, or missing test case introduced by the diff.
                 Tool round budget: %d. Use candidate_evidence_bundle to verify if the line actually changed.
                 Return exactly JSON: {"verdict":"KEEP|DROP|DEMOTE","confidence":0.0,"corrected_line":null,"reason":"strict justification"}.
                 """.formatted(settings.verifierMaxToolRounds()));
         payload.put("repo", repo);
         payload.put("target", target);
+        payload.put("pr_summary", reviewResult.summary);
         payload.put("candidate", issueMap(issue));
         payload.put("changed_file", changedFileForIssue(triage, issue));
         payload.put("risk_probes", probesForIssue(analysis, issue));
